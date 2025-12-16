@@ -180,9 +180,9 @@ void convert_to_bcm(uint16_t* pixels) {
 }
 
 // ============================================
-// HUB75 Initialize
+// HUB75 Initialize - GPIO only (for boot screen)
 // ============================================
-void hub75_init() {
+void hub75_gpio_init() {
     // Initialize GPIO pins
     for (int pin = PIN_R0; pin <= PIN_ADDR_D; pin++) {
         gpio_init(pin);
@@ -197,11 +197,27 @@ void hub75_init() {
     // Clear buffers
     memset(frame_buffer, 0, sizeof(frame_buffer));
     memset(bcm_planes, 0, sizeof(bcm_planes));
+}
 
 #if HUB75_USE_PIO
+// ============================================
+// HUB75 Initialize - PIO (call after boot screen)
+// ============================================
+void hub75_pio_init() {
     // Load and init PIO program
+    // This takes over GP0-5 (RGB) and GP6 (CLK) from GPIO control
     uint offset = pio_add_program(hub75_pio, &hub75_data_program);
     hub75_data_program_init(hub75_pio, sm_data, offset, PIN_R0, PIN_CLK);
+}
+#endif
+
+// ============================================
+// HUB75 Initialize - Full (legacy, for non-PIO mode)
+// ============================================
+void hub75_init() {
+    hub75_gpio_init();
+#if HUB75_USE_PIO
+    hub75_pio_init();
 #endif
 }
 
@@ -386,11 +402,17 @@ void show_boot_screen() {
 // Core1: Display Driver
 // ============================================
 void setup1() {
-    hub75_init();
+    // Initialize GPIO pins first (before PIO takes over)
+    hub75_gpio_init();
 
-    // Show boot screen animation
+    // Show boot screen animation using direct GPIO
     show_boot_screen();
     boot_complete = true;
+
+#if HUB75_USE_PIO
+    // Now initialize PIO (takes over GP0-5 and GP6 from GPIO)
+    hub75_pio_init();
+#endif
 }
 
 void loop1() {

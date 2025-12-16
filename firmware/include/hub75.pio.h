@@ -20,9 +20,9 @@
 
 static const uint16_t hub75_data_program_instructions[] = {
     //     .wrap_target
-    0x80a0, //  0: pull   block           side 0     
-    0x6006, //  1: out    pins, 6         side 0     
-    0x1000, //  2: jmp    0               side 1     
+    0x80a0, //  0: pull   block           side 0        ; get 32-bit data from FIFO
+    0x6706, //  1: out    pins, 6         side 0 [7]    ; output 6 bits, data setup time
+    0x1700, //  2: jmp    0               side 1 [7]    ; CLK HIGH, hold for shift register
     //     .wrap
 };
 
