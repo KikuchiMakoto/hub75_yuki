@@ -271,18 +271,14 @@ class LEDMatrixController:
     def play_video(
         self,
         path: Union[str, Path],
-        loop: bool = False,
-        max_fps: bool = False,
-        wait_ack: bool = True
+        loop: bool = False
     ):
         """
-        Play a video file.
+        Play a video file with frame dropping to maintain real-time playback.
 
         Args:
             path: Path to video file
             loop: Loop playback
-            max_fps: If True, ignore video FPS and send as fast as possible
-            wait_ack: Ignored (kept for compatibility)
         """
         if not HAS_CV2:
             raise ImportError("OpenCV required: pip install opencv-python")
@@ -292,10 +288,8 @@ class LEDMatrixController:
             raise ValueError(f"Cannot open video: {path}")
 
         video_fps = cap.get(cv2.CAP_PROP_FPS) or 30
-        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-        frame_time = 1.0 / video_fps
 
-        fps_str = "max" if max_fps else f"{video_fps:.1f} (with frame drop)"
+        fps_str = f"{video_fps:.1f} (with frame drop)"
 
         print(f"Playing: {path}")
         print(f"Mode: COBS, Target FPS: {fps_str}")
@@ -315,7 +309,7 @@ class LEDMatrixController:
                 current_frame = int(cap.get(cv2.CAP_PROP_POS_FRAMES))
 
                 # Skip frames if we're behind (frame dropping)
-                if not max_fps and ideal_frame > current_frame:
+                if ideal_frame > current_frame:
                     frames_to_skip = ideal_frame - current_frame
                     frames_dropped += frames_to_skip
                     cap.set(cv2.CAP_PROP_POS_FRAMES, ideal_frame)
@@ -332,7 +326,7 @@ class LEDMatrixController:
                         break
 
                 frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                self.send_frame(frame, wait_ack=wait_ack)
+                self.send_frame(frame)
                 frames_sent += 1
 
                 # Print FPS and dropped frames periodically
