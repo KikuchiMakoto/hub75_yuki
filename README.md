@@ -2,7 +2,7 @@
 
 128x32 HUB75 LEDマトリックスパネルを制御する完全なシステムです。RP2040 (Raspberry Pi Pico) とPythonアプリケーションで構成されています。
 
-## 📁 プロジェクト構成
+## プロジェクト構成
 
 ```
 ├── application/    # Python制御アプリケーション
@@ -11,14 +11,29 @@
     └── src/       # HUB75ドライバ (PlatformIO/Arduino)
 ```
 
-## ✨ 特徴
+## 特徴
 
 - **複数入力対応**: 画像、動画、Webカメラ、テキスト、デモアニメーション
 - **高速表示**: PIO (Programmable I/O) による高速シフト出力
 - **デュアルコア**: Core0でUSB受信、Core1でパネル駆動
-- **簡単セットアップ**: PlatformIOとPythonで簡単にビルド・実行
+- **簡単セットアップ**: PlatformIOとuvで簡単にビルド・実行
 
-## 🚀 クイックスタート
+## クイックスタート
+
+### 必要なツール
+
+- **ファームウェア**: [PlatformIO](https://platformio.org/)
+- **アプリケーション**: [uv](https://docs.astral.sh/uv/) (Python パッケージマネージャー)
+
+### uvのインストール
+
+```bash
+# macOS / Linux
+curl -LsSf https://astral.sh/uv/install.sh | sh
+
+# Windows (PowerShell)
+powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"
+```
 
 ### 1. ファームウェアをRP2040に書き込む
 
@@ -31,24 +46,32 @@ pio run -t upload
 
 ```bash
 cd application
+
+# 画像表示
 uv run led-matrix --image photo.jpg
+
+# デモアニメーション
+uv run led-matrix --demo rainbow
+
+# ヘルプ表示
+uv run led-matrix --help
 ```
 
 詳細は各ディレクトリのREADMEを参照してください:
 - [Application README](application/README.md)
 - [Firmware README](firmware/README.md)
 
-## 🔌 ハードウェア要件
+## ハードウェア要件
 
 - Raspberry Pi Pico (RP2040)
 - HUB75 LED パネル 64x32 x 2枚 (合計128x32)
 - USBケーブル
 - 5V電源 (LEDパネル用)
 
-## 📝 ライセンス
+## ライセンス
 
 MIT License
 
-## 🤝 貢献
+## 貢献
 
-Issue、Pull Requestを歓迎します！
+Issue、Pull Requestを歓迎します!
