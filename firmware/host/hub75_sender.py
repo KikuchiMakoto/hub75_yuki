@@ -135,13 +135,6 @@ class HUB75Controller:
         encoded = cobs_encode(raw_data)
         self.serial.write(encoded + b'\x00')
 
-        if wait_ack:
-            ack = self.serial.read(1)
-            if ack == b'K':
-                self._update_fps()
-                return True
-            return False
-
         self._update_fps()
         return True
     

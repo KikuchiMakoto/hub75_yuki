@@ -226,11 +226,11 @@ class LEDMatrixController:
     def send_frame(self, image: np.ndarray, wait_ack: bool = True) -> bool:
         """
         Send a frame to the display.
-        
+
         Args:
             image: RGB image (any size, will be resized)
-            wait_ack: Wait for acknowledgment
-            
+            wait_ack: Ignored (kept for compatibility)
+
         Returns:
             True if successful
         """
@@ -282,7 +282,7 @@ class LEDMatrixController:
             path: Path to video file
             loop: Loop playback
             max_fps: If True, ignore video FPS and send as fast as possible
-            wait_ack: Wait for ACK after each frame (disable for higher FPS)
+            wait_ack: Ignored (kept for compatibility)
         """
         if not HAS_CV2:
             raise ImportError("OpenCV required: pip install opencv-python")
@@ -294,11 +294,10 @@ class LEDMatrixController:
         video_fps = cap.get(cv2.CAP_PROP_FPS) or 30
         frame_time = 1.0 / video_fps
 
-        ack_str = "sync" if wait_ack else "async"
         fps_str = "max" if max_fps else f"{video_fps:.1f}"
 
         print(f"Playing: {path}")
-        print(f"Mode: COBS, ACK: {ack_str}, Target FPS: {fps_str}")
+        print(f"Mode: COBS, Target FPS: {fps_str}")
         print("Press Ctrl+C to stop")
 
         try:

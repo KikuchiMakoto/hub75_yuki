@@ -458,11 +458,8 @@ void loop() {
 
                     write_buf = target;
                     new_frame = true;
-                    Serial.write('K');  // ACK
-                } else {
-                    // Invalid size - discard packet
-                    Serial.write('E');  // Error
                 }
+                // Invalid packets are silently discarded
             }
             // Reset for next packet
             recv_pos = 0;
@@ -473,7 +470,6 @@ void loop() {
                 recv_buffer[recv_pos++] = c;
             } else {
                 // Buffer overflow - discard packet and reset
-                Serial.write('E');  // Error
                 recv_pos = 0;
             }
         }

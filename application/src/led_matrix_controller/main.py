@@ -131,7 +131,7 @@ Examples:
     perf_group.add_argument(
         "--no-ack",
         action="store_true",
-        help="Don't wait for ACK (faster but may drop frames)"
+        help="Deprecated (ACK is no longer used)"
     )
     
     args = parser.parse_args()
