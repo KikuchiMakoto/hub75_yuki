@@ -3,14 +3,12 @@
 LED Matrix Controller - Main Entry Point
 
 Control 128x32 HUB75 LED matrix panel via USB CDC.
-Supports image, video, camera, text, and various demo modes.
+Supports image, video, and various demo modes.
 
 Usage:
     python -m led_matrix_controller.main --help
     python -m led_matrix_controller.main --image photo.jpg
     python -m led_matrix_controller.main --video movie.mp4
-    python -m led_matrix_controller.main --camera
-    python -m led_matrix_controller.main --text "Hello World" --scroll
     python -m led_matrix_controller.main --demo rainbow
 """
 
@@ -42,19 +40,13 @@ def main():
 Examples:
   # Display image
   python -m led_matrix_controller.main --image photo.jpg
-  
+
   # Play video
   python -m led_matrix_controller.main --video movie.mp4
-  
-  # Webcam input
-  python -m led_matrix_controller.main --camera
-  
-  # Scrolling text
-  python -m led_matrix_controller.main --text "Hello!" --scroll
-  
+
   # Rainbow demo
   python -m led_matrix_controller.main --demo rainbow
-  
+
   # Terminal preview (no hardware)
   python -m led_matrix_controller.main --device terminal --demo rainbow
 """
@@ -99,16 +91,6 @@ Examples:
         help="Play video file"
     )
     input_mutex.add_argument(
-        "--camera", "-c",
-        action="store_true",
-        help="Use webcam input"
-    )
-    input_mutex.add_argument(
-        "--text", "-t",
-        metavar="TEXT",
-        help="Display text"
-    )
-    input_mutex.add_argument(
         "--demo",
         choices=["rainbow", "gradient", "plasma", "fire", "matrix", "clock"],
         help="Run demo animation"
@@ -121,23 +103,6 @@ Examples:
     
     # Display options
     display_group = parser.add_argument_group("Display options")
-    display_group.add_argument(
-        "--scroll",
-        action="store_true",
-        help="Enable scrolling for text"
-    )
-    display_group.add_argument(
-        "--scroll-speed",
-        type=float,
-        default=0.03,
-        help="Scroll speed in seconds per pixel (default: 0.03)"
-    )
-    display_group.add_argument(
-        "--camera-id",
-        type=int,
-        default=0,
-        help="Camera device ID (default: 0)"
-    )
     display_group.add_argument(
         "--loop",
         action="store_true",
@@ -159,9 +124,9 @@ Examples:
     args = parser.parse_args()
     
     # Validate arguments
-    if not any([args.image, args.video, args.camera, args.text, args.demo, args.fill]):
+    if not any([args.image, args.video, args.demo, args.fill]):
         parser.print_help()
-        print("\nError: Please specify an input source (--image, --video, --camera, --text, --demo, or --fill)")
+        print("\nError: Please specify an input source (--image, --video, --demo, or --fill)")
         sys.exit(1)
     
     try:
@@ -181,23 +146,13 @@ Examples:
             if args.image:
                 controller.display_image(args.image)
                 input("Press Enter to exit...")
-                
+
             elif args.video:
                 controller.play_video(args.video, loop=args.loop)
-                
-            elif args.camera:
-                controller.camera_input(camera_id=args.camera_id)
-                
-            elif args.text:
-                if args.scroll:
-                    controller.scroll_text(args.text, speed=args.scroll_speed)
-                else:
-                    controller.display_text(args.text)
-                    input("Press Enter to exit...")
-                    
+
             elif args.demo:
                 controller.run_demo(args.demo, fps=args.fps)
-                
+
             elif args.fill:
                 r, g, b = map(int, args.fill.split(","))
                 controller.fill((r, g, b))
