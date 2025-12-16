@@ -4,12 +4,19 @@
 
 ## プロジェクト構成
 
+このプロジェクトは、**Application** と **Firmware** の2つの独立したコンポーネントで構成されています：
+
 ```
-├── application/    # Python制御アプリケーション
+├── application/    # Python制御アプリケーション (PC側)
 │   └── src/       # LED Matrix Controller (画像/動画/カメラ/テキスト表示)
-└── firmware/      # RP2040ファームウェア
+└── firmware/      # RP2040ファームウェア (マイコン側)
     └── src/       # HUB75ドライバ (PlatformIO/Arduino)
 ```
+
+### 役割分担
+
+- **Firmware** (`firmware/`): RP2040上で動作するC++コード。HUB75パネルの駆動とUSB通信のみを担当
+- **Application** (`application/`): PC上で動作するPythonコード。画像処理、動画再生、デモ生成などを担当
 
 ## 特徴
 
@@ -22,11 +29,23 @@
 
 ### 必要なツール
 
-- **ファームウェア**: [PlatformIO](https://platformio.org/)
-- **アプリケーション**: [uv](https://docs.astral.sh/uv/) (Python パッケージマネージャー)
+- **Firmware用**: [PlatformIO](https://platformio.org/) - RP2040へのファームウェア書き込み
+- **Application用**: [uv](https://docs.astral.sh/uv/) - Pythonパッケージマネージャー
 
-### uvのインストール
+### セットアップ手順
 
+#### 1. Firmwareをビルド・書き込み (初回のみ)
+
+```bash
+cd firmware
+pio run -t upload
+```
+
+RP2040にファームウェアが書き込まれ、HUB75パネルの駆動が可能になります。
+
+#### 2. Applicationを実行 (PC側)
+
+uvをインストール:
 ```bash
 # macOS / Linux
 curl -LsSf https://astral.sh/uv/install.sh | sh
@@ -35,23 +54,15 @@ curl -LsSf https://astral.sh/uv/install.sh | sh
 powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"
 ```
 
-### 1. ファームウェアをRP2040に書き込む
-
-```bash
-cd firmware
-pio run -t upload
-```
-
-### 2. Pythonアプリケーションを実行
-
+アプリケーションを実行:
 ```bash
 cd application
 
-# 画像表示
-uv run led-matrix --image photo.jpg
-
 # デモアニメーション
 uv run led-matrix --demo rainbow
+
+# 画像表示
+uv run led-matrix --image photo.jpg
 
 # ヘルプ表示
 uv run led-matrix --help
