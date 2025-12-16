@@ -121,18 +121,6 @@ Examples:
         help="Brightness multiplier 0.0-1.0 (default: 1.0)"
     )
 
-    # Performance options
-    perf_group = parser.add_argument_group("Performance options")
-    perf_group.add_argument(
-        "--max-fps",
-        action="store_true",
-        help="Ignore video FPS limit, send frames as fast as possible"
-    )
-    perf_group.add_argument(
-        "--no-ack",
-        action="store_true",
-        help="Deprecated (ACK is no longer used)"
-    )
     
     args = parser.parse_args()
     
@@ -161,12 +149,7 @@ Examples:
                 input("Press Enter to exit...")
 
             elif args.video:
-                controller.play_video(
-                    args.video,
-                    loop=args.loop,
-                    max_fps=args.max_fps,
-                    wait_ack=not args.no_ack
-                )
+                controller.play_video(args.video, loop=args.loop)
 
             elif args.demo:
                 controller.run_demo(args.demo, fps=args.fps)
