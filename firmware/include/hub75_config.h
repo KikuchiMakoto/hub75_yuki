@@ -50,4 +50,11 @@
 #define FRAME_SIZE_RGB565   (DISPLAY_WIDTH * DISPLAY_HEIGHT * 2)  // 8192 bytes
 #define RECV_BUFFER_SIZE    12000  // Base64 + margin
 
+// ============================================
+// Binary transfer mode
+// ============================================
+// Magic header for binary mode: 0xFF 0x00 (not valid Base64)
+#define BINARY_MAGIC_0      0xFF
+#define BINARY_MAGIC_1      0x00
+
 #endif // HUB75_CONFIG_H
