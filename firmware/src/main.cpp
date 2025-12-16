@@ -1,10 +1,10 @@
 /**
  * HUB75 LED Panel Controller for RP2040
  * PlatformIO / Arduino (Earle Philhower core)
- * 
+ *
  * Core0: USB CDC receive (Base64 encoded RGB565)
- * Core1: HUB75 panel driving (PIO-based BCM)
- * 
+ * Core1: HUB75 panel driving (CPU GPIO-based BCM)
+ *
  * Pin connections:
  *   GP0-5:   R0,G0,B0,R1,G1,B1 (RGB data)
  *   GP6:     CLK (clock)
@@ -14,13 +14,15 @@
  */
 
 #include <Arduino.h>
-#include <hardware/pio.h>
-#include <hardware/dma.h>
+// PIO disabled - using CPU GPIO instead
+// #include <hardware/pio.h>
+// #include <hardware/dma.h>
 #ifdef USE_TINYUSB
 #include <Adafruit_TinyUSB.h>
 #endif
 #include "hub75_config.h"
-#include "hub75.pio.h"
+// PIO program disabled
+// #include "hub75.pio.h"
 
 // ============================================
 // Base64 Decoder
@@ -92,11 +94,8 @@ static size_t recv_pos = 0;
 // Gamma table
 static uint8_t gamma_tbl[256];
 
-// ============================================
-// PIO
-// ============================================
-static PIO hub75_pio = pio0;
-static uint sm_data = 0;
+// Boot screen complete flag
+static volatile bool boot_complete = false;
 
 // ============================================
 // Initialize gamma table
@@ -154,7 +153,7 @@ void convert_to_bcm(uint16_t* pixels) {
 }
 
 // ============================================
-// HUB75 Initialize
+// HUB75 Initialize (CPU GPIO version)
 // ============================================
 void hub75_init() {
     // Initialize GPIO pins
@@ -164,63 +163,71 @@ void hub75_init() {
         gpio_put(pin, 0);
     }
     gpio_put(PIN_OE, 1);  // Display off
-    
+
     // Initialize gamma table
     init_gamma(2.2f);
-    
+
     // Clear buffers
     memset(frame_buffer, 0, sizeof(frame_buffer));
     memset(bcm_planes, 0, sizeof(bcm_planes));
-    
-    // Load and init PIO program
-    uint offset = pio_add_program(hub75_pio, &hub75_data_program);
-    hub75_data_program_init(hub75_pio, sm_data, offset, PIN_R0, PIN_CLK);
+
+    // PIO initialization removed - using CPU GPIO instead
 }
 
 // ============================================
-// HUB75 Refresh (called from Core1)
+// Shift out one pixel data via GPIO (CPU version)
+// ============================================
+static inline void shift_out_pixel(uint8_t data) {
+    // Set RGB data pins (GP0-5)
+    gpio_put(PIN_R0, (data >> 0) & 1);
+    gpio_put(PIN_G0, (data >> 1) & 1);
+    gpio_put(PIN_B0, (data >> 2) & 1);
+    gpio_put(PIN_R1, (data >> 3) & 1);
+    gpio_put(PIN_G1, (data >> 4) & 1);
+    gpio_put(PIN_B1, (data >> 5) & 1);
+
+    // Clock pulse
+    gpio_put(PIN_CLK, 1);
+    __asm volatile("nop\nnop\nnop\nnop");
+    gpio_put(PIN_CLK, 0);
+    __asm volatile("nop\nnop");
+}
+
+// ============================================
+// HUB75 Refresh (called from Core1) - CPU GPIO version
 // ============================================
 void hub75_refresh() {
     for (int bit = 0; bit < COLOR_DEPTH; bit++) {
         uint32_t delay = 1 << bit;
-        
+
         for (int row = 0; row < SCAN_ROWS; row++) {
             // Disable output
             gpio_put(PIN_OE, 1);
-            
+
             // Shift out pixel data (right to left for chained panels)
             uint8_t* row_data = bcm_planes[row][bit];
-            
+
             for (int x = DISPLAY_WIDTH - 1; x >= 0; x--) {
-                while (pio_sm_is_tx_fifo_full(hub75_pio, sm_data)) {
-                    tight_loop_contents();
-                }
-                pio_sm_put(hub75_pio, sm_data, row_data[x]);
+                shift_out_pixel(row_data[x]);
             }
-            
-            // Wait for shift complete
-            while (!pio_sm_is_tx_fifo_empty(hub75_pio, sm_data)) {
-                tight_loop_contents();
-            }
-            __asm volatile("nop\nnop\nnop\nnop");
-            
+
             // Set row address
             gpio_put(PIN_ADDR_A, (row >> 0) & 1);
             gpio_put(PIN_ADDR_B, (row >> 1) & 1);
             gpio_put(PIN_ADDR_C, (row >> 2) & 1);
             gpio_put(PIN_ADDR_D, (row >> 3) & 1);
-            
+
             // Latch
             gpio_put(PIN_LAT, 1);
             __asm volatile("nop\nnop");
             gpio_put(PIN_LAT, 0);
-            
+
             // Enable output
             gpio_put(PIN_OE, 0);
-            
+
             // BCM delay
             delayMicroseconds(delay);
-            
+
             // Disable output
             gpio_put(PIN_OE, 1);
         }
@@ -228,10 +235,81 @@ void hub75_refresh() {
 }
 
 // ============================================
+// Boot Screen: RGB color sweep animation
+// ============================================
+void show_boot_screen() {
+    // RGB color sweep: Red -> Green -> Blue flows across the screen
+    const int ANIM_FRAMES = 60;
+    const int SWEEP_WIDTH = 32;
+
+    for (int frame = 0; frame < ANIM_FRAMES; frame++) {
+        // Calculate sweep position for each color
+        int red_pos = frame * 5 - SWEEP_WIDTH;
+        int green_pos = red_pos - 50;
+        int blue_pos = green_pos - 50;
+
+        // Fill frame buffer with RGB sweep
+        for (int y = 0; y < DISPLAY_HEIGHT; y++) {
+            for (int x = 0; x < DISPLAY_WIDTH; x++) {
+                uint8_t r = 0, g = 0, b = 0;
+
+                // Red sweep
+                if (x >= red_pos && x < red_pos + SWEEP_WIDTH) {
+                    int dist = x - red_pos;
+                    if (dist < SWEEP_WIDTH / 2) {
+                        r = (dist * 255) / (SWEEP_WIDTH / 2);
+                    } else {
+                        r = ((SWEEP_WIDTH - dist) * 255) / (SWEEP_WIDTH / 2);
+                    }
+                }
+
+                // Green sweep
+                if (x >= green_pos && x < green_pos + SWEEP_WIDTH) {
+                    int dist = x - green_pos;
+                    if (dist < SWEEP_WIDTH / 2) {
+                        g = (dist * 255) / (SWEEP_WIDTH / 2);
+                    } else {
+                        g = ((SWEEP_WIDTH - dist) * 255) / (SWEEP_WIDTH / 2);
+                    }
+                }
+
+                // Blue sweep
+                if (x >= blue_pos && x < blue_pos + SWEEP_WIDTH) {
+                    int dist = x - blue_pos;
+                    if (dist < SWEEP_WIDTH / 2) {
+                        b = (dist * 255) / (SWEEP_WIDTH / 2);
+                    } else {
+                        b = ((SWEEP_WIDTH - dist) * 255) / (SWEEP_WIDTH / 2);
+                    }
+                }
+
+                // Convert to RGB565
+                uint16_t rgb565 = ((r >> 3) << 11) | ((g >> 2) << 5) | (b >> 3);
+                frame_buffer[0][y * DISPLAY_WIDTH + x] = rgb565;
+            }
+        }
+
+        // Convert to BCM and refresh display multiple times for visibility
+        convert_to_bcm(frame_buffer[0]);
+        for (int refresh = 0; refresh < 8; refresh++) {
+            hub75_refresh();
+        }
+    }
+
+    // Clear display after boot animation
+    memset(frame_buffer[0], 0, sizeof(frame_buffer[0]));
+    convert_to_bcm(frame_buffer[0]);
+}
+
+// ============================================
 // Core1: Display Driver
 // ============================================
 void setup1() {
     hub75_init();
+
+    // Show boot screen animation
+    show_boot_screen();
+    boot_complete = true;
 }
 
 void loop1() {
@@ -241,7 +319,7 @@ void loop1() {
         new_frame = false;
         convert_to_bcm(frame_buffer[read_buf]);
     }
-    
+
     // Continuous refresh
     hub75_refresh();
 }
