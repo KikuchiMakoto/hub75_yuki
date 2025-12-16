@@ -12,8 +12,6 @@ dist/
 downloads/
 eggs/
 .eggs/
-lib/
-lib64/
 parts/
 sdist/
 var/
@@ -24,6 +22,10 @@ share/python-wheels/
 .installed.cfg
 *.egg
 PIPFILE.lock
+
+# Python build directories (not web_application/src/lib)
+/lib/
+/lib64/
 
 # Virtual environments
 venv/
@@ -48,3 +50,12 @@ htmlcov/
 # OS
 Thumbs.db
 Desktop.ini
+
+# Web Application (Bun + React)
+web_application/node_modules/
+web_application/dist/
+web_application/.vite/
+
+# Bun
+*.bun
+.bun/
