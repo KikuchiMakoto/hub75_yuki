@@ -26,6 +26,9 @@ from .devices.base import BaseDevice
 DISPLAY_WIDTH = 128
 DISPLAY_HEIGHT = 32
 
+# Binary mode magic header (must match firmware)
+BINARY_MAGIC = bytes([0xFF, 0x00])
+
 
 class LEDMatrixController:
     """Controller for 128x32 HUB75 LED Matrix panel."""
@@ -35,22 +38,25 @@ class LEDMatrixController:
         device: BaseDevice,
         width: int = DISPLAY_WIDTH,
         height: int = DISPLAY_HEIGHT,
-        brightness: float = 1.0
+        brightness: float = 1.0,
+        binary_mode: bool = True
     ):
         """
         Initialize controller.
-        
+
         Args:
             device: Output device (SerialDevice, TerminalDevice, etc.)
             width: Display width in pixels
             height: Display height in pixels
             brightness: Brightness multiplier (0.0-1.0)
+            binary_mode: Use binary transfer (faster) instead of Base64
         """
         self.device = device
         self.width = width
         self.height = height
         self.brightness = max(0.0, min(1.0, brightness))
-        
+        self.binary_mode = binary_mode
+
         # FPS tracking
         self._frame_count = 0
         self._fps_start = time.time()
@@ -134,13 +140,13 @@ class LEDMatrixController:
     
     def _encode_frame(self, image: np.ndarray) -> bytes:
         """
-        Encode image to Base64 RGB565.
+        Encode image for transmission.
 
         Args:
             image: RGB image (H, W, 3) uint8
 
         Returns:
-            Base64 encoded bytes + newline
+            Encoded bytes (binary or Base64 depending on mode)
         """
         # Resize to display dimensions
         if image.shape[:2] != (self.height, self.width):
@@ -155,14 +161,17 @@ class LEDMatrixController:
 
         # Convert to RGB565
         rgb565 = self._rgb_to_rgb565(image)
-        
+
         # Convert to bytes (little-endian)
         data = rgb565.astype('<u2').tobytes()
-        
-        # Base64 encode
-        b64_data = base64.b64encode(data)
-        
-        return b64_data + b'\n'
+
+        if self.binary_mode:
+            # Binary mode: magic header + raw data (no newline needed)
+            return BINARY_MAGIC + data
+        else:
+            # Base64 mode: encoded data + newline
+            b64_data = base64.b64encode(data)
+            return b64_data + b'\n'
     
     def _update_fps(self):
         """Update FPS counter."""
@@ -223,21 +232,40 @@ class LEDMatrixController:
         image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
         self.send_frame(image)
     
-    def play_video(self, path: Union[str, Path], loop: bool = False):
-        """Play a video file."""
+    def play_video(
+        self,
+        path: Union[str, Path],
+        loop: bool = False,
+        max_fps: bool = False,
+        wait_ack: bool = True
+    ):
+        """
+        Play a video file.
+
+        Args:
+            path: Path to video file
+            loop: Loop playback
+            max_fps: If True, ignore video FPS and send as fast as possible
+            wait_ack: Wait for ACK after each frame (disable for higher FPS)
+        """
         if not HAS_CV2:
             raise ImportError("OpenCV required: pip install opencv-python")
-        
+
         cap = cv2.VideoCapture(str(path))
         if not cap.isOpened():
             raise ValueError(f"Cannot open video: {path}")
-        
-        fps = cap.get(cv2.CAP_PROP_FPS) or 30
-        frame_time = 1.0 / fps
-        
-        print(f"Playing: {path} ({fps:.1f} fps)")
+
+        video_fps = cap.get(cv2.CAP_PROP_FPS) or 30
+        frame_time = 1.0 / video_fps
+
+        mode_str = "binary" if self.binary_mode else "base64"
+        ack_str = "sync" if wait_ack else "async"
+        fps_str = "max" if max_fps else f"{video_fps:.1f}"
+
+        print(f"Playing: {path}")
+        print(f"Mode: {mode_str}, ACK: {ack_str}, Target FPS: {fps_str}")
         print("Press Ctrl+C to stop")
-        
+
         try:
             while True:
                 ret, frame = cap.read()
@@ -247,21 +275,22 @@ class LEDMatrixController:
                         continue
                     else:
                         break
-                
+
                 frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                
+
                 start = time.time()
-                self.send_frame(frame)
-                
-                # Maintain frame rate
-                elapsed = time.time() - start
-                if elapsed < frame_time:
-                    time.sleep(frame_time - elapsed)
-                
+                self.send_frame(frame, wait_ack=wait_ack)
+
+                # Maintain frame rate (unless max_fps mode)
+                if not max_fps:
+                    elapsed = time.time() - start
+                    if elapsed < frame_time:
+                        time.sleep(frame_time - elapsed)
+
                 # Print FPS periodically
                 if self._frame_count == 0:
                     print(f"\rFPS: {self.fps:.1f}  ", end='', flush=True)
-                    
+
         finally:
             cap.release()
             print()

@@ -120,6 +120,24 @@ Examples:
         default=1.0,
         help="Brightness multiplier 0.0-1.0 (default: 1.0)"
     )
+
+    # Performance options
+    perf_group = parser.add_argument_group("Performance options")
+    perf_group.add_argument(
+        "--max-fps",
+        action="store_true",
+        help="Ignore video FPS limit, send frames as fast as possible"
+    )
+    perf_group.add_argument(
+        "--no-ack",
+        action="store_true",
+        help="Don't wait for ACK (faster but may drop frames)"
+    )
+    perf_group.add_argument(
+        "--base64",
+        action="store_true",
+        help="Use Base64 encoding instead of binary (slower, for compatibility)"
+    )
     
     args = parser.parse_args()
     
@@ -136,7 +154,8 @@ Examples:
         # Create controller
         controller = LEDMatrixController(
             device=device,
-            brightness=args.brightness
+            brightness=args.brightness,
+            binary_mode=not args.base64
         )
         
         # Connect
@@ -148,7 +167,12 @@ Examples:
                 input("Press Enter to exit...")
 
             elif args.video:
-                controller.play_video(args.video, loop=args.loop)
+                controller.play_video(
+                    args.video,
+                    loop=args.loop,
+                    max_fps=args.max_fps,
+                    wait_ack=not args.no_ack
+                )
 
             elif args.demo:
                 controller.run_demo(args.demo, fps=args.fps)

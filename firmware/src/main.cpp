@@ -112,6 +112,10 @@ static uint8_t bcm_planes[SCAN_ROWS][COLOR_DEPTH][DISPLAY_WIDTH];
 static uint8_t recv_buffer[RECV_BUFFER_SIZE];
 static size_t recv_pos = 0;
 
+// Binary mode state
+static bool binary_mode = false;
+static size_t binary_bytes_remaining = 0;
+
 // Gamma table
 static uint8_t gamma_tbl[256];
 
@@ -442,11 +446,49 @@ void loop() {
         convert_to_bcm(frame_buffer[read_buf]);
     }
 
+    // Read all available bytes for better throughput
+    int available = Serial.available();
+    if (available <= 0) return;
+
+    // Binary mode: read directly into frame buffer
+    if (binary_mode) {
+        uint8_t target = 1 - read_buf;
+        uint8_t* dest = (uint8_t*)frame_buffer[target];
+        size_t offset = FRAME_SIZE_RGB565 - binary_bytes_remaining;
+
+        while (available > 0 && binary_bytes_remaining > 0) {
+            int to_read = min((size_t)available, binary_bytes_remaining);
+            int actual = Serial.readBytes(dest + offset, to_read);
+            binary_bytes_remaining -= actual;
+            offset += actual;
+            available -= actual;
+        }
+
+        if (binary_bytes_remaining == 0) {
+            // Frame complete
+            write_buf = target;
+            new_frame = true;
+            binary_mode = false;
+            Serial.write('K');  // ACK
+        }
+        return;
+    }
+
+    // Text/Base64 mode
     while (Serial.available()) {
         uint8_t c = Serial.read();
 
+        // Check for binary mode magic header at start of buffer
+        if (recv_pos == 1 && recv_buffer[0] == BINARY_MAGIC_0 && c == BINARY_MAGIC_1) {
+            // Switch to binary mode
+            binary_mode = true;
+            binary_bytes_remaining = FRAME_SIZE_RGB565;
+            recv_pos = 0;
+            return;
+        }
+
         if (c == '\n') {
-            // Decode frame
+            // Decode frame (Base64 mode)
             if (recv_pos > 0) {
                 size_t expected = base64_decode_length(recv_buffer, recv_pos);
 

@@ -80,8 +80,11 @@ class SerialDevice(BaseDevice):
                 self.port,
                 self.baudrate,
                 timeout=self.timeout,
-                write_timeout=1.0
+                write_timeout=2.0
             )
+            # Optimize buffer sizes for high throughput
+            if hasattr(self._serial, 'set_buffer_size'):
+                self._serial.set_buffer_size(rx_size=16384, tx_size=16384)
             
             # Clear buffers
             self._serial.reset_input_buffer()
