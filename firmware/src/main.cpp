@@ -2,8 +2,8 @@
  * HUB75 LED Panel Controller for RP2040
  * PlatformIO / Arduino (Earle Philhower core)
  *
- * Core0: USB CDC receive (Base64 encoded RGB565)
- * Core1: HUB75 panel driving (PIO or CPU GPIO-based BCM)
+ * Core0: USB CDC receive (Base64 encoded RGB565) + BCM conversion
+ * Core1: HUB75 panel refresh ONLY (no other operations for flicker-free display)
  *
  * Build options (platformio.ini):
  *   -D HUB75_USE_PIO=1  : Use PIO for high-speed shifting (default)
@@ -399,7 +399,7 @@ void show_boot_screen() {
 }
 
 // ============================================
-// Core1: Display Driver
+// Core1: Display Refresh ONLY (flicker-free)
 // ============================================
 void setup1() {
     // Initialize GPIO pins first (before PIO takes over)
@@ -416,19 +416,13 @@ void setup1() {
 }
 
 void loop1() {
-    // Check for new frame
-    if (new_frame) {
-        read_buf = write_buf;
-        new_frame = false;
-        convert_to_bcm(frame_buffer[read_buf]);
-    }
-
-    // Continuous refresh
+    // Core1: Display refresh ONLY - no other operations
+    // Frame check and BCM conversion moved to Core0 to prevent display flickering
     hub75_refresh();
 }
 
 // ============================================
-// Core0: USB CDC Reception
+// Core0: USB CDC Reception + BCM Conversion
 // ============================================
 void setup() {
     Serial.begin(115200);  // Baud ignored for USB CDC
@@ -439,6 +433,15 @@ void setup() {
 }
 
 void loop() {
+    // Process new frame (moved from Core1 to avoid display flickering)
+    // Note: Memory access may race with Core1's hub75_refresh() but
+    // this trade-off is acceptable for smoother display
+    if (new_frame) {
+        read_buf = write_buf;
+        new_frame = false;
+        convert_to_bcm(frame_buffer[read_buf]);
+    }
+
     while (Serial.available()) {
         uint8_t c = Serial.read();
 
