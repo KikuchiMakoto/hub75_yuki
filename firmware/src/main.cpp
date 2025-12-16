@@ -75,7 +75,7 @@ size_t base64_decode_length(const uint8_t* input, size_t len) {
     return (len * 3) / 4 - padding;
 }
 
-size_t base64_decode(const uint8_t* input, size_t len, uint8_t* output) {
+size_t base64_decode(const uint8_t* input, size_t len, uint8_t* output, size_t max_output) {
     size_t out_len = 0;
     uint32_t accum = 0;
     int bits = 0;
@@ -91,6 +91,10 @@ size_t base64_decode(const uint8_t* input, size_t len, uint8_t* output) {
 
         if (bits >= 8) {
             bits -= 8;
+            // Bounds check before writing
+            if (out_len >= max_output) {
+                return 0;  // Buffer overflow detected
+            }
             output[out_len++] = (accum >> bits) & 0xFF;
         }
     }
@@ -456,9 +460,41 @@ void loop() {
         uint8_t* dest = (uint8_t*)frame_buffer[target];
         size_t offset = FRAME_SIZE_RGB565 - binary_bytes_remaining;
 
+        // Safety check: verify offset is within bounds
+        if (offset > FRAME_SIZE_RGB565) {
+            // Corrupted state, reset binary mode
+            binary_mode = false;
+            binary_bytes_remaining = 0;
+            recv_pos = 0;
+            Serial.write('E');  // Error
+            return;
+        }
+
         while (available > 0 && binary_bytes_remaining > 0) {
-            int to_read = min((size_t)available, binary_bytes_remaining);
+            size_t to_read = min((size_t)available, binary_bytes_remaining);
+
+            // Bounds check before reading
+            if (offset + to_read > FRAME_SIZE_RGB565) {
+                // Buffer overflow protection
+                binary_mode = false;
+                binary_bytes_remaining = 0;
+                recv_pos = 0;
+                Serial.write('E');  // Error
+                return;
+            }
+
             int actual = Serial.readBytes(dest + offset, to_read);
+            if (actual <= 0) break;  // No more data available
+
+            // Protect against underflow
+            if ((size_t)actual > binary_bytes_remaining) {
+                binary_mode = false;
+                binary_bytes_remaining = 0;
+                recv_pos = 0;
+                Serial.write('E');  // Error
+                return;
+            }
+
             binary_bytes_remaining -= actual;
             offset += actual;
             available -= actual;
@@ -475,7 +511,12 @@ void loop() {
     }
 
     // Text/Base64 mode
-    while (Serial.available()) {
+    // Limit iterations to prevent infinite loop (watchdog protection)
+    int max_iterations = 1024;
+    int iterations = 0;
+
+    while (Serial.available() && iterations < max_iterations) {
+        iterations++;
         uint8_t c = Serial.read();
 
         // Check for binary mode magic header at start of buffer
@@ -495,7 +536,8 @@ void loop() {
                 if (expected == FRAME_SIZE_RGB565) {
                     uint8_t target = 1 - read_buf;
                     size_t decoded = base64_decode(recv_buffer, recv_pos,
-                                                   (uint8_t*)frame_buffer[target]);
+                                                   (uint8_t*)frame_buffer[target],
+                                                   FRAME_SIZE_RGB565);
 
                     if (decoded == FRAME_SIZE_RGB565) {
                         write_buf = target;
@@ -514,6 +556,8 @@ void loop() {
             if (recv_pos < RECV_BUFFER_SIZE - 1) {
                 recv_buffer[recv_pos++] = c;
             } else {
+                // Buffer overflow protection: send error and reset
+                Serial.write('E');  // Error
                 recv_pos = 0;
             }
         }
