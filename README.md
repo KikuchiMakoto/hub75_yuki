@@ -4,19 +4,22 @@
 
 ## プロジェクト構成
 
-このプロジェクトは、**Application** と **Firmware** の2つの独立したコンポーネントで構成されています：
+このプロジェクトは、**Application**、**Web Application**、**Firmware** の3つのコンポーネントで構成されています：
 
 ```
-├── application/    # Python制御アプリケーション (PC側)
-│   └── src/       # LED Matrix Controller (画像/動画/カメラ/テキスト表示)
-└── firmware/      # RP2040ファームウェア (マイコン側)
-    └── src/       # HUB75ドライバ (PlatformIO/Arduino)
+├── application/        # Python制御アプリケーション (PC側)
+│   └── src/           # LED Matrix Controller (画像/動画/カメラ/テキスト表示)
+├── web_application/   # Webアプリケーション (ブラウザ側)
+│   └── src/           # React + TypeScript (Web Serial API対応)
+└── firmware/          # RP2040ファームウェア (マイコン側)
+    └── src/           # HUB75ドライバ (PlatformIO/Arduino)
 ```
 
 ### 役割分担
 
 - **Firmware** (`firmware/`): RP2040上で動作するC++コード。HUB75パネルの駆動とUSB通信のみを担当
 - **Application** (`application/`): PC上で動作するPythonコード。画像処理、動画再生、デモ生成などを担当
+- **Web Application** (`web_application/`): ブラウザで動作するWebアプリケーション。Web Serial APIを使用してUSB経由で制御
 
 ## 特徴
 
@@ -68,8 +71,21 @@ uv run led-matrix --image photo.jpg
 uv run led-matrix --help
 ```
 
+#### 3. Web Applicationを使用 (ブラウザ側)
+
+Web Serial APIを使用してブラウザから直接制御することもできます：
+
+```bash
+cd web_application
+bun install
+bun run dev
+```
+
+ブラウザで `http://localhost:5173` を開き、画像・動画のドラッグアンドドロップやデモアニメーションを実行できます。
+
 詳細は各ディレクトリのREADMEを参照してください:
 - [Application README](application/README.md)
+- [Web Application README](web_application/README.md)
 - [Firmware README](firmware/README.md)
 
 ## ハードウェア要件
