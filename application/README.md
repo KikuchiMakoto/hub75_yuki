@@ -9,6 +9,23 @@
 - **RGB565エンコード**: Base64 + 改行でRP2040に送信
 - **複数出力デバイス**: シリアル、ターミナルシミュレータ、画像出力
 
+## 必要条件
+
+- Python 3.9以上
+- [uv](https://docs.astral.sh/uv/) (推奨パッケージマネージャー)
+
+### uvのインストール
+
+```bash
+# macOS / Linux
+curl -LsSf https://astral.sh/uv/install.sh | sh
+
+# Windows (PowerShell)
+powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"
+
+# pipでインストール
+pip install uv
+```
 
 ## 使い方
 
@@ -35,65 +52,65 @@ uv run led-matrix --camera
 
 ```bash
 # 静的テキスト
-python -m led-matrix --text "Hello World"
+uv run led-matrix --text "Hello World"
 
 # スクロールテキスト
-python -m led-matrix --text "スクロールメッセージ" --scroll
+uv run led-matrix --text "スクロールメッセージ" --scroll
 
 # スクロール速度指定
-python -m led-matrix --text "Fast!" --scroll --scroll-speed 0.01
+uv run led-matrix --text "Fast!" --scroll --scroll-speed 0.01
 ```
 
 ### デモアニメーション
 
 ```bash
 # レインボー
-python -m led-matrix --demo rainbow
+uv run led-matrix --demo rainbow
 
 # プラズマ
-python -m led-matrix --demo plasma
+uv run led-matrix --demo plasma
 
 # 炎エフェクト
-python -m led-matrix --demo fire
+uv run led-matrix --demo fire
 
 # マトリックス風
-python -m led-matrix --demo matrix
+uv run led-matrix --demo matrix
 
 # 時計
-python -m led-matrix --demo clock
+uv run led-matrix --demo clock
 ```
 
 ### 単色塗りつぶし
 
 ```bash
 # 赤
-python -m led-matrix --fill 255,0,0
+uv run led-matrix --fill 255,0,0
 
 # 緑
-python -m led-matrix --fill 0,255,0
+uv run led-matrix --fill 0,255,0
 ```
 
 ### デバイス指定
 
 ```bash
 # シリアルポート指定
-python -m led-matrix --port COM3 --demo rainbow
+uv run led-matrix --port COM3 --demo rainbow
 
 # ターミナルシミュレータ (ハードウェアなしでテスト)
-python -m led-matrix --device terminal --demo rainbow
+uv run led-matrix --device terminal --demo rainbow
 
 # 画像出力 (PNG保存)
-python -m led-matrix --device image --image photo.jpg
+uv run led-matrix --device image --image photo.jpg
 ```
 
 ### その他のオプション
 
 ```bash
 # 明るさ調整 (0.0-1.0)
-python -m led-matrix --brightness 0.5 --demo rainbow
+uv run led-matrix --brightness 0.5 --demo rainbow
 
 # FPS指定
-python -m led-matrix --fps 60 --demo plasma
+uv run led-matrix --fps 60 --demo plasma
 ```
 
 ## コマンドラインオプション
@@ -127,7 +144,7 @@ python -m led-matrix --fps 60 --demo plasma
 ```
 PC → RP2040:
     [Base64(RGB565データ)]\n
-    
+
     データサイズ: 128 × 32 × 2 = 8192 bytes
     Base64後: 約 10924 bytes + 改行
 
@@ -139,9 +156,8 @@ RP2040 → PC:
 ## プロジェクト構造
 
 ```
-led_matrix_app/
-├── pyproject.toml
-├── requirements.txt
+application/
+├── pyproject.toml      # プロジェクト設定 (uv/pip互換)
 ├── README.md
 └── src/
     └── led_matrix_controller/
@@ -158,7 +174,7 @@ led_matrix_app/
 ## ファームウェア
 
 このアプリケーションは以下のRP2040ファームウェアと連携します:
-- hub75_platformio プロジェクト
+- [firmware/](../firmware/) ディレクトリ参照
 
 ## ライセンス
 
