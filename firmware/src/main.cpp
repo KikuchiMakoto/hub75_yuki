@@ -14,6 +14,8 @@
  */
 
 #include <Arduino.h>
+#include <hardware/gpio.h>
+#include <hardware/structs/sio.h>
 // PIO disabled - using CPU GPIO instead
 // #include <hardware/pio.h>
 // #include <hardware/dma.h>
@@ -23,6 +25,15 @@
 #include "hub75_config.h"
 // PIO program disabled
 // #include "hub75.pio.h"
+
+// GPIO masks for fast register access
+#define RGB_MASK    ((1 << PIN_R0) | (1 << PIN_G0) | (1 << PIN_B0) | \
+                     (1 << PIN_R1) | (1 << PIN_G1) | (1 << PIN_B1))
+#define CLK_MASK    (1 << PIN_CLK)
+#define LAT_MASK    (1 << PIN_LAT)
+#define OE_MASK     (1 << PIN_OE)
+#define ADDR_MASK   ((1 << PIN_ADDR_A) | (1 << PIN_ADDR_B) | \
+                     (1 << PIN_ADDR_C) | (1 << PIN_ADDR_D))
 
 // ============================================
 // Base64 Decoder
@@ -175,130 +186,132 @@ void hub75_init() {
 }
 
 // ============================================
-// Shift out one pixel data via GPIO (CPU version)
+// Shift out one pixel data via GPIO (CPU version - fast register access)
 // ============================================
-static inline void shift_out_pixel(uint8_t data) {
-    // Set RGB data pins (GP0-5)
-    gpio_put(PIN_R0, (data >> 0) & 1);
-    gpio_put(PIN_G0, (data >> 1) & 1);
-    gpio_put(PIN_B0, (data >> 2) & 1);
-    gpio_put(PIN_R1, (data >> 3) & 1);
-    gpio_put(PIN_G1, (data >> 4) & 1);
-    gpio_put(PIN_B1, (data >> 5) & 1);
+static inline void __not_in_flash_func(shift_out_pixel)(uint8_t data) {
+    // Clear RGB pins, then set the ones that should be high
+    // Data bits 0-5 map directly to GPIO 0-5
+    sio_hw->gpio_clr = RGB_MASK;
+    sio_hw->gpio_set = (data & 0x3F);
 
-    // Clock pulse
-    gpio_put(PIN_CLK, 1);
-    __asm volatile("nop\nnop\nnop\nnop");
-    gpio_put(PIN_CLK, 0);
-    __asm volatile("nop\nnop");
+    // Clock pulse - rising edge latches data into shift register
+    sio_hw->gpio_set = CLK_MASK;
+    __asm volatile("nop\nnop\nnop\nnop\nnop\nnop\nnop\nnop");
+    sio_hw->gpio_clr = CLK_MASK;
+}
+
+// ============================================
+// Set row address using direct register access
+// ============================================
+static inline void __not_in_flash_func(set_row_address)(int row) {
+    // Clear all address bits, then set the correct ones
+    sio_hw->gpio_clr = ADDR_MASK;
+    uint32_t addr_bits = (((row >> 0) & 1) << PIN_ADDR_A) |
+                         (((row >> 1) & 1) << PIN_ADDR_B) |
+                         (((row >> 2) & 1) << PIN_ADDR_C) |
+                         (((row >> 3) & 1) << PIN_ADDR_D);
+    sio_hw->gpio_set = addr_bits;
 }
 
 // ============================================
 // HUB75 Refresh (called from Core1) - CPU GPIO version
 // ============================================
-void hub75_refresh() {
+void __not_in_flash_func(hub75_refresh)() {
     for (int bit = 0; bit < COLOR_DEPTH; bit++) {
-        uint32_t delay = 1 << bit;
+        uint32_t delay_us = 1 << bit;
 
         for (int row = 0; row < SCAN_ROWS; row++) {
-            // Disable output
-            gpio_put(PIN_OE, 1);
+            // 1. Disable output (OE HIGH)
+            sio_hw->gpio_set = OE_MASK;
 
-            // Shift out pixel data (right to left for chained panels)
+            // 2. Shift out pixel data (right to left for chained panels)
             uint8_t* row_data = bcm_planes[row][bit];
-
             for (int x = DISPLAY_WIDTH - 1; x >= 0; x--) {
                 shift_out_pixel(row_data[x]);
             }
 
-            // Set row address
-            gpio_put(PIN_ADDR_A, (row >> 0) & 1);
-            gpio_put(PIN_ADDR_B, (row >> 1) & 1);
-            gpio_put(PIN_ADDR_C, (row >> 2) & 1);
-            gpio_put(PIN_ADDR_D, (row >> 3) & 1);
+            // 3. Set row address
+            set_row_address(row);
 
-            // Latch
-            gpio_put(PIN_LAT, 1);
-            __asm volatile("nop\nnop");
-            gpio_put(PIN_LAT, 0);
+            // 4. Latch pulse
+            sio_hw->gpio_set = LAT_MASK;
+            __asm volatile("nop\nnop\nnop\nnop");
+            sio_hw->gpio_clr = LAT_MASK;
 
-            // Enable output
-            gpio_put(PIN_OE, 0);
+            // 5. Enable output (OE LOW)
+            sio_hw->gpio_clr = OE_MASK;
 
-            // BCM delay
-            delayMicroseconds(delay);
+            // 6. BCM delay - display this bit plane
+            delayMicroseconds(delay_us);
 
-            // Disable output
-            gpio_put(PIN_OE, 1);
+            // 7. Disable output before next row
+            sio_hw->gpio_set = OE_MASK;
         }
     }
 }
 
 // ============================================
-// Boot Screen: RGB color sweep animation
+// Simple row display for boot screen (no BCM, max brightness)
 // ============================================
-void show_boot_screen() {
-    // RGB color sweep: Red -> Green -> Blue flows across the screen
-    const int ANIM_FRAMES = 60;
-    const int SWEEP_WIDTH = 32;
+void __not_in_flash_func(display_solid_color)(uint8_t color_mask, int duration_ms) {
+    // color_mask: bit0=R0, bit1=G0, bit2=B0, bit3=R1, bit4=G1, bit5=B1
+    uint32_t start = millis();
 
-    for (int frame = 0; frame < ANIM_FRAMES; frame++) {
-        // Calculate sweep position for each color
-        int red_pos = frame * 5 - SWEEP_WIDTH;
-        int green_pos = red_pos - 50;
-        int blue_pos = green_pos - 50;
+    while (millis() - start < (uint32_t)duration_ms) {
+        for (int row = 0; row < SCAN_ROWS; row++) {
+            // 1. Disable output
+            sio_hw->gpio_set = OE_MASK;
 
-        // Fill frame buffer with RGB sweep
-        for (int y = 0; y < DISPLAY_HEIGHT; y++) {
+            // 2. Shift out all pixels with the solid color
             for (int x = 0; x < DISPLAY_WIDTH; x++) {
-                uint8_t r = 0, g = 0, b = 0;
+                // Set color data
+                sio_hw->gpio_clr = RGB_MASK;
+                sio_hw->gpio_set = (color_mask & 0x3F);
 
-                // Red sweep
-                if (x >= red_pos && x < red_pos + SWEEP_WIDTH) {
-                    int dist = x - red_pos;
-                    if (dist < SWEEP_WIDTH / 2) {
-                        r = (dist * 255) / (SWEEP_WIDTH / 2);
-                    } else {
-                        r = ((SWEEP_WIDTH - dist) * 255) / (SWEEP_WIDTH / 2);
-                    }
-                }
-
-                // Green sweep
-                if (x >= green_pos && x < green_pos + SWEEP_WIDTH) {
-                    int dist = x - green_pos;
-                    if (dist < SWEEP_WIDTH / 2) {
-                        g = (dist * 255) / (SWEEP_WIDTH / 2);
-                    } else {
-                        g = ((SWEEP_WIDTH - dist) * 255) / (SWEEP_WIDTH / 2);
-                    }
-                }
-
-                // Blue sweep
-                if (x >= blue_pos && x < blue_pos + SWEEP_WIDTH) {
-                    int dist = x - blue_pos;
-                    if (dist < SWEEP_WIDTH / 2) {
-                        b = (dist * 255) / (SWEEP_WIDTH / 2);
-                    } else {
-                        b = ((SWEEP_WIDTH - dist) * 255) / (SWEEP_WIDTH / 2);
-                    }
-                }
-
-                // Convert to RGB565
-                uint16_t rgb565 = ((r >> 3) << 11) | ((g >> 2) << 5) | (b >> 3);
-                frame_buffer[0][y * DISPLAY_WIDTH + x] = rgb565;
+                // Clock pulse
+                sio_hw->gpio_set = CLK_MASK;
+                __asm volatile("nop\nnop\nnop\nnop");
+                sio_hw->gpio_clr = CLK_MASK;
             }
-        }
 
-        // Convert to BCM and refresh display multiple times for visibility
-        convert_to_bcm(frame_buffer[0]);
-        for (int refresh = 0; refresh < 8; refresh++) {
-            hub75_refresh();
+            // 3. Set row address
+            set_row_address(row);
+
+            // 4. Latch
+            sio_hw->gpio_set = LAT_MASK;
+            __asm volatile("nop\nnop\nnop\nnop");
+            sio_hw->gpio_clr = LAT_MASK;
+
+            // 5. Enable output
+            sio_hw->gpio_clr = OE_MASK;
+
+            // 6. Display time per row
+            delayMicroseconds(100);
+
+            // 7. Disable before next row
+            sio_hw->gpio_set = OE_MASK;
         }
     }
+}
 
-    // Clear display after boot animation
-    memset(frame_buffer[0], 0, sizeof(frame_buffer[0]));
-    convert_to_bcm(frame_buffer[0]);
+// ============================================
+// Boot Screen: RGB color sweep animation (max brightness)
+// ============================================
+void show_boot_screen() {
+    // Show solid RED (R0=1, R1=8 -> 0x09)
+    display_solid_color(0x09, 500);
+
+    // Show solid GREEN (G0=2, G1=16 -> 0x12)
+    display_solid_color(0x12, 500);
+
+    // Show solid BLUE (B0=4, B1=32 -> 0x24)
+    display_solid_color(0x24, 500);
+
+    // Show WHITE briefly (all colors on -> 0x3F)
+    display_solid_color(0x3F, 300);
+
+    // Clear display after boot
+    memset(bcm_planes, 0, sizeof(bcm_planes));
 }
 
 // ============================================
