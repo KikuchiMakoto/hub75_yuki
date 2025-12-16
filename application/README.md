@@ -48,18 +48,6 @@ uv run led-matrix --video movie.mp4 --loop
 uv run led-matrix --camera
 ```
 
-### テキスト表示
-
-```bash
-# 静的テキスト
-uv run led-matrix --text "Hello World"
-
-# スクロールテキスト
-uv run led-matrix --text "スクロールメッセージ" --scroll
-
-# スクロール速度指定
-uv run led-matrix --text "Fast!" --scroll --scroll-speed 0.01
-```
 
 ### デモアニメーション
 
@@ -80,60 +68,26 @@ uv run led-matrix --demo matrix
 uv run led-matrix --demo clock
 ```
 
-### 単色塗りつぶし
-
-```bash
-# 赤
-uv run led-matrix --fill 255,0,0
-
-# 緑
-uv run led-matrix --fill 0,255,0
-```
-
 ### デバイス指定
 
 ```bash
 # シリアルポート指定
 uv run led-matrix --port COM3 --demo rainbow
-
-# ターミナルシミュレータ (ハードウェアなしでテスト)
-uv run led-matrix --device terminal --demo rainbow
-
-# 画像出力 (PNG保存)
-uv run led-matrix --device image --image photo.jpg
-```
-
-### その他のオプション
-
-```bash
-# 明るさ調整 (0.0-1.0)
-uv run led-matrix --brightness 0.5 --demo rainbow
-
-# FPS指定
-uv run led-matrix --fps 60 --demo plasma
 ```
 
 ## コマンドラインオプション
 
 ```
 デバイスオプション:
-  --device {serial,terminal,image}  出力デバイス (default: serial)
   --port PORT                       シリアルポート (自動検出)
   --baudrate BAUDRATE               ボーレート (default: 115200)
-  --output-dir DIR                  画像出力ディレクトリ (default: output)
 
 入力オプション (排他):
   --image FILE                      画像ファイル
   --video FILE                      動画ファイル
-  --camera                          Webカメラ
-  --text TEXT                       テキスト
   --demo {rainbow,gradient,plasma,fire,matrix,clock}  デモ
-  --fill R,G,B                      単色塗りつぶし
 
 表示オプション:
-  --scroll                          テキストスクロール
-  --scroll-speed SPEED              スクロール速度 (default: 0.03)
-  --camera-id ID                    カメラID (default: 0)
   --loop                            動画ループ
   --fps FPS                         デモFPS (default: 30)
   --brightness BRIGHTNESS           明るさ 0.0-1.0 (default: 1.0)
