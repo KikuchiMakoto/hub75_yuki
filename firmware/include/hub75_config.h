@@ -48,13 +48,10 @@
 // Buffer sizes
 // ============================================
 #define FRAME_SIZE_RGB565   (DISPLAY_WIDTH * DISPLAY_HEIGHT * 2)  // 8192 bytes
-#define RECV_BUFFER_SIZE    12000  // Base64 + margin
 
-// ============================================
-// Binary transfer mode
-// ============================================
-// Magic header for binary mode: 0xFF 0x00 (not valid Base64)
-#define BINARY_MAGIC_0      0xFF
-#define BINARY_MAGIC_1      0x00
+// COBS encoding overhead: 1 byte per 254 bytes + 1
+// Max encoded size: 8192 + ceil(8192/254) + 1 = 8226
+// Add margin for safety
+#define RECV_BUFFER_SIZE    8300  // COBS encoded frame + margin
 
 #endif // HUB75_CONFIG_H

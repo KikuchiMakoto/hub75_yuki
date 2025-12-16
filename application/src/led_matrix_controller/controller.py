@@ -6,7 +6,6 @@ and communication with the LED matrix panel.
 """
 
 import time
-import base64
 import math
 from typing import Tuple, Optional, Union
 from pathlib import Path
@@ -26,8 +25,52 @@ from .devices.base import BaseDevice
 DISPLAY_WIDTH = 128
 DISPLAY_HEIGHT = 32
 
-# Binary mode magic header (must match firmware)
-BINARY_MAGIC = bytes([0xFF, 0x00])
+
+def cobs_encode(data: bytes) -> bytes:
+    """
+    Encode data using COBS (Consistent Overhead Byte Stuffing).
+
+    COBS removes all zero bytes from the data stream, replacing them
+    with overhead codes. The packet is terminated with a zero byte.
+
+    Args:
+        data: Input data to encode
+
+    Returns:
+        COBS-encoded data (does not include terminating 0x00)
+    """
+    if not data:
+        return b'\x01'  # Empty packet
+
+    output = bytearray()
+    code_index = 0
+    code = 1
+
+    output.append(0)  # Placeholder for first code
+
+    for byte in data:
+        if byte == 0:
+            # Found zero - write code and start new segment
+            output[code_index] = code
+            code_index = len(output)
+            output.append(0)  # Placeholder for next code
+            code = 1
+        else:
+            # Copy non-zero byte
+            output.append(byte)
+            code += 1
+
+            if code == 0xFF:
+                # Segment full (254 bytes) - write code and start new segment
+                output[code_index] = code
+                code_index = len(output)
+                output.append(0)  # Placeholder for next code
+                code = 1
+
+    # Write final code
+    output[code_index] = code
+
+    return bytes(output)
 
 
 class LEDMatrixController:
@@ -38,8 +81,7 @@ class LEDMatrixController:
         device: BaseDevice,
         width: int = DISPLAY_WIDTH,
         height: int = DISPLAY_HEIGHT,
-        brightness: float = 1.0,
-        binary_mode: bool = True
+        brightness: float = 1.0
     ):
         """
         Initialize controller.
@@ -49,13 +91,11 @@ class LEDMatrixController:
             width: Display width in pixels
             height: Display height in pixels
             brightness: Brightness multiplier (0.0-1.0)
-            binary_mode: Use binary transfer (faster) instead of Base64
         """
         self.device = device
         self.width = width
         self.height = height
         self.brightness = max(0.0, min(1.0, brightness))
-        self.binary_mode = binary_mode
 
         # FPS tracking
         self._frame_count = 0
@@ -140,13 +180,13 @@ class LEDMatrixController:
     
     def _encode_frame(self, image: np.ndarray) -> bytes:
         """
-        Encode image for transmission.
+        Encode image for transmission using COBS.
 
         Args:
             image: RGB image (H, W, 3) uint8
 
         Returns:
-            Encoded bytes (binary or Base64 depending on mode)
+            COBS-encoded bytes with 0x00 terminator
         """
         # Resize to display dimensions
         if image.shape[:2] != (self.height, self.width):
@@ -165,13 +205,9 @@ class LEDMatrixController:
         # Convert to bytes (little-endian)
         data = rgb565.astype('<u2').tobytes()
 
-        if self.binary_mode:
-            # Binary mode: magic header + raw data (no newline needed)
-            return BINARY_MAGIC + data
-        else:
-            # Base64 mode: encoded data + newline
-            b64_data = base64.b64encode(data)
-            return b64_data + b'\n'
+        # COBS encode and add 0x00 terminator
+        encoded = cobs_encode(data)
+        return encoded + b'\x00'
     
     def _update_fps(self):
         """Update FPS counter."""
@@ -258,12 +294,11 @@ class LEDMatrixController:
         video_fps = cap.get(cv2.CAP_PROP_FPS) or 30
         frame_time = 1.0 / video_fps
 
-        mode_str = "binary" if self.binary_mode else "base64"
         ack_str = "sync" if wait_ack else "async"
         fps_str = "max" if max_fps else f"{video_fps:.1f}"
 
         print(f"Playing: {path}")
-        print(f"Mode: {mode_str}, ACK: {ack_str}, Target FPS: {fps_str}")
+        print(f"Mode: COBS, ACK: {ack_str}, Target FPS: {fps_str}")
         print("Press Ctrl+C to stop")
 
         try:

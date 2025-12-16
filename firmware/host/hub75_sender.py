@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 HUB75 LED Panel Controller - Host Side
-Sends Base64 encoded RGB565 frames via USB CDC
+Sends COBS-encoded RGB565 frames via USB CDC
 
 Requirements:
     pip install pyserial numpy opencv-python
@@ -15,7 +15,6 @@ Usage:
 
 import sys
 import time
-import base64
 import argparse
 from typing import Optional, Tuple
 
@@ -38,6 +37,40 @@ except ImportError:
 # Display configuration
 DISPLAY_WIDTH = 128
 DISPLAY_HEIGHT = 32
+
+
+def cobs_encode(data: bytes) -> bytes:
+    """
+    Encode data using COBS (Consistent Overhead Byte Stuffing).
+    Returns COBS-encoded data (does not include terminating 0x00).
+    """
+    if not data:
+        return b'\x01'
+
+    output = bytearray()
+    code_index = 0
+    code = 1
+
+    output.append(0)  # Placeholder for first code
+
+    for byte in data:
+        if byte == 0:
+            output[code_index] = code
+            code_index = len(output)
+            output.append(0)
+            code = 1
+        else:
+            output.append(byte)
+            code += 1
+
+            if code == 0xFF:
+                output[code_index] = code
+                code_index = len(output)
+                output.append(0)
+                code = 1
+
+    output[code_index] = code
+    return bytes(output)
 
 
 def rgb888_to_rgb565(image: np.ndarray) -> np.ndarray:
@@ -89,24 +122,26 @@ class HUB75Controller:
     def send_frame(self, image: np.ndarray, wait_ack: bool = True) -> bool:
         if self.serial is None:
             raise RuntimeError("Not connected")
-        
+
         # Resize
         if image.shape[:2] != (DISPLAY_HEIGHT, DISPLAY_WIDTH):
             image = cv2.resize(image, (DISPLAY_WIDTH, DISPLAY_HEIGHT))
-        
-        # Convert to RGB565 and Base64
+
+        # Convert to RGB565
         rgb565 = rgb888_to_rgb565(image)
-        data = base64.b64encode(rgb565.astype('<u2').tobytes())
-        
-        self.serial.write(data + b'\n')
-        
+        raw_data = rgb565.astype('<u2').tobytes()
+
+        # COBS encode and add 0x00 terminator
+        encoded = cobs_encode(raw_data)
+        self.serial.write(encoded + b'\x00')
+
         if wait_ack:
             ack = self.serial.read(1)
             if ack == b'K':
                 self._update_fps()
                 return True
             return False
-        
+
         self._update_fps()
         return True
     
