@@ -292,38 +292,53 @@ class LEDMatrixController:
             raise ValueError(f"Cannot open video: {path}")
 
         video_fps = cap.get(cv2.CAP_PROP_FPS) or 30
+        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
         frame_time = 1.0 / video_fps
 
-        fps_str = "max" if max_fps else f"{video_fps:.1f}"
+        fps_str = "max" if max_fps else f"{video_fps:.1f} (with frame drop)"
 
         print(f"Playing: {path}")
         print(f"Mode: COBS, Target FPS: {fps_str}")
         print("Press Ctrl+C to stop")
 
         try:
+            playback_start = time.time()
+            frames_sent = 0
+            frames_dropped = 0
+
             while True:
+                # Calculate ideal frame number based on elapsed time
+                elapsed = time.time() - playback_start
+                ideal_frame = int(elapsed * video_fps)
+
+                # Get current frame position
+                current_frame = int(cap.get(cv2.CAP_PROP_POS_FRAMES))
+
+                # Skip frames if we're behind (frame dropping)
+                if not max_fps and ideal_frame > current_frame:
+                    frames_to_skip = ideal_frame - current_frame
+                    frames_dropped += frames_to_skip
+                    cap.set(cv2.CAP_PROP_POS_FRAMES, ideal_frame)
+
                 ret, frame = cap.read()
                 if not ret:
                     if loop:
                         cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+                        playback_start = time.time()
+                        frames_sent = 0
+                        frames_dropped = 0
                         continue
                     else:
                         break
 
                 frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-
-                start = time.time()
                 self.send_frame(frame, wait_ack=wait_ack)
+                frames_sent += 1
 
-                # Maintain frame rate (unless max_fps mode)
-                if not max_fps:
-                    elapsed = time.time() - start
-                    if elapsed < frame_time:
-                        time.sleep(frame_time - elapsed)
-
-                # Print FPS periodically
+                # Print FPS and dropped frames periodically
                 if self._frame_count == 0:
-                    print(f"\rFPS: {self.fps:.1f}  ", end='', flush=True)
+                    drop_rate = (frames_dropped / (frames_sent + frames_dropped) * 100) if (frames_sent + frames_dropped) > 0 else 0
+                    print(f"\rFPS: {self.fps:.1f}, Dropped: {frames_dropped} ({drop_rate:.1f}%)  ", end='', flush=True)
 
         finally:
             cap.release()
