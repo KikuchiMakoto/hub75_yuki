@@ -60,19 +60,22 @@ pio run -t upload
 pio device monitor
 ```
 
-## PC側
+## アプリケーション側
+
+ファームウェアの書き込み後、アプリケーション側から制御します。
+詳細は [../application/README.md](../application/README.md) を参照してください。
 
 ```bash
-pip install pyserial numpy opencv-python
+cd ../application
 
-# レインボー
-python host/hub75_sender.py
+# デモアニメーション
+uv run led-matrix --demo rainbow
 
-# 動画
-python host/hub75_sender.py video.mp4
+# 画像表示
+uv run led-matrix --image photo.jpg
 
-# カメラ
-python host/hub75_sender.py --camera
+# 動画再生
+uv run led-matrix --video movie.mp4
 ```
 
 ## 通信プロトコル
@@ -85,14 +88,12 @@ Pico → PC: 'K' (ACK) / 'E' (Error)
 ## ファイル構成
 
 ```
-hub75_platformio/
+firmware/
 ├── platformio.ini
 ├── include/
 │   ├── hub75_config.h
 │   └── hub75.pio.h
 ├── src/
 │   └── main.cpp
-├── host/
-│   └── hub75_sender.py
 └── README.md
 ```
