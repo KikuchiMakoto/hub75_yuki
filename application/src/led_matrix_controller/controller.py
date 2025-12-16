@@ -135,20 +135,24 @@ class LEDMatrixController:
     def _encode_frame(self, image: np.ndarray) -> bytes:
         """
         Encode image to Base64 RGB565.
-        
+
         Args:
             image: RGB image (H, W, 3) uint8
-            
+
         Returns:
             Base64 encoded bytes + newline
         """
         # Resize to display dimensions
         if image.shape[:2] != (self.height, self.width):
             image = self._resize_image(image)
-        
+
         # Apply brightness
         image = self._apply_brightness(image)
-        
+
+        # Horizontal flip for HUB75 shift register order
+        # Data is shifted right-to-left, last pixel shifted stays at left edge
+        image = np.fliplr(image)
+
         # Convert to RGB565
         rgb565 = self._rgb_to_rgb565(image)
         
