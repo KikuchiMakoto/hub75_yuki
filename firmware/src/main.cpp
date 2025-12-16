@@ -46,55 +46,44 @@
                      (1 << PIN_ADDR_C) | (1 << PIN_ADDR_D))
 
 // ============================================
-// Base64 Decoder
+// COBS (Consistent Overhead Byte Stuffing) Decoder
 // ============================================
-static const uint8_t b64_table[256] = {
-    64,64,64,64,64,64,64,64,64,64,64,64,64,64,64,64,
-    64,64,64,64,64,64,64,64,64,64,64,64,64,64,64,64,
-    64,64,64,64,64,64,64,64,64,64,64,62,64,64,64,63,
-    52,53,54,55,56,57,58,59,60,61,64,64,64,64,64,64,
-    64, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9,10,11,12,13,14,
-    15,16,17,18,19,20,21,22,23,24,25,64,64,64,64,64,
-    64,26,27,28,29,30,31,32,33,34,35,36,37,38,39,40,
-    41,42,43,44,45,46,47,48,49,50,51,64,64,64,64,64,
-    64,64,64,64,64,64,64,64,64,64,64,64,64,64,64,64,
-    64,64,64,64,64,64,64,64,64,64,64,64,64,64,64,64,
-    64,64,64,64,64,64,64,64,64,64,64,64,64,64,64,64,
-    64,64,64,64,64,64,64,64,64,64,64,64,64,64,64,64,
-    64,64,64,64,64,64,64,64,64,64,64,64,64,64,64,64,
-    64,64,64,64,64,64,64,64,64,64,64,64,64,64,64,64,
-    64,64,64,64,64,64,64,64,64,64,64,64,64,64,64,64,
-    64,64,64,64,64,64,64,64,64,64,64,64,64,64,64,64
-};
-
-size_t base64_decode_length(const uint8_t* input, size_t len) {
+// Decodes COBS-encoded data back to original payload.
+// Returns decoded length, or 0 on error.
+// Max overhead: 1 byte per 254 bytes of data + 1 byte
+size_t cobs_decode(const uint8_t* input, size_t len, uint8_t* output, size_t max_output) {
     if (len == 0) return 0;
-    size_t padding = 0;
-    if (len >= 1 && input[len-1] == '=') padding++;
-    if (len >= 2 && input[len-2] == '=') padding++;
-    return (len * 3) / 4 - padding;
-}
 
-size_t base64_decode(const uint8_t* input, size_t len, uint8_t* output) {
-    size_t out_len = 0;
-    uint32_t accum = 0;
-    int bits = 0;
+    size_t read_idx = 0;
+    size_t write_idx = 0;
 
-    for (size_t i = 0; i < len; i++) {
-        uint8_t c = input[i];
-        if (c == '=') break;
-        uint8_t val = b64_table[c];
-        if (val == 64) continue;
+    while (read_idx < len) {
+        uint8_t code = input[read_idx++];
 
-        accum = (accum << 6) | val;
-        bits += 6;
+        if (code == 0) {
+            // Invalid: zero byte in encoded data
+            return 0;
+        }
 
-        if (bits >= 8) {
-            bits -= 8;
-            output[out_len++] = (accum >> bits) & 0xFF;
+        // Copy (code - 1) bytes
+        for (uint8_t i = 1; i < code && read_idx < len; i++) {
+            // Bounds check
+            if (write_idx >= max_output) {
+                return 0;  // Buffer overflow
+            }
+            output[write_idx++] = input[read_idx++];
+        }
+
+        // Add zero byte if code != 0xFF and not at end
+        if (code != 0xFF && read_idx < len) {
+            if (write_idx >= max_output) {
+                return 0;  // Buffer overflow
+            }
+            output[write_idx++] = 0x00;
         }
     }
-    return out_len;
+
+    return write_idx;
 }
 
 // ============================================
@@ -108,13 +97,12 @@ static volatile bool new_frame = false;
 // BCM bit planes: [row][bit][x] = packed 6-bit RGB
 static uint8_t bcm_planes[SCAN_ROWS][COLOR_DEPTH][DISPLAY_WIDTH];
 
-// Receive buffer
+// COBS receive buffer
 static uint8_t recv_buffer[RECV_BUFFER_SIZE];
 static size_t recv_pos = 0;
 
-// Binary mode state
-static bool binary_mode = false;
-static size_t binary_bytes_remaining = 0;
+// Decode buffer for COBS output
+static uint8_t decode_buffer[FRAME_SIZE_RGB565];
 
 // Gamma table
 static uint8_t gamma_tbl[256];
@@ -446,74 +434,42 @@ void loop() {
         convert_to_bcm(frame_buffer[read_buf]);
     }
 
-    // Read all available bytes for better throughput
-    int available = Serial.available();
-    if (available <= 0) return;
+    // COBS packet reception: read until 0x00 delimiter
+    // Limit iterations to prevent infinite loop (watchdog protection)
+    int max_iterations = 1024;
+    int iterations = 0;
 
-    // Binary mode: read directly into frame buffer
-    if (binary_mode) {
-        uint8_t target = 1 - read_buf;
-        uint8_t* dest = (uint8_t*)frame_buffer[target];
-        size_t offset = FRAME_SIZE_RGB565 - binary_bytes_remaining;
-
-        while (available > 0 && binary_bytes_remaining > 0) {
-            int to_read = min((size_t)available, binary_bytes_remaining);
-            int actual = Serial.readBytes(dest + offset, to_read);
-            binary_bytes_remaining -= actual;
-            offset += actual;
-            available -= actual;
-        }
-
-        if (binary_bytes_remaining == 0) {
-            // Frame complete
-            write_buf = target;
-            new_frame = true;
-            binary_mode = false;
-            Serial.write('K');  // ACK
-        }
-        return;
-    }
-
-    // Text/Base64 mode
-    while (Serial.available()) {
+    while (Serial.available() && iterations < max_iterations) {
+        iterations++;
         uint8_t c = Serial.read();
 
-        // Check for binary mode magic header at start of buffer
-        if (recv_pos == 1 && recv_buffer[0] == BINARY_MAGIC_0 && c == BINARY_MAGIC_1) {
-            // Switch to binary mode
-            binary_mode = true;
-            binary_bytes_remaining = FRAME_SIZE_RGB565;
-            recv_pos = 0;
-            return;
-        }
-
-        if (c == '\n') {
-            // Decode frame (Base64 mode)
+        if (c == 0x00) {
+            // Packet delimiter received - decode COBS packet
             if (recv_pos > 0) {
-                size_t expected = base64_decode_length(recv_buffer, recv_pos);
+                // Decode COBS into temporary buffer
+                size_t decoded_len = cobs_decode(recv_buffer, recv_pos,
+                                                 decode_buffer, FRAME_SIZE_RGB565);
 
-                if (expected == FRAME_SIZE_RGB565) {
+                // Verify size matches expected frame size
+                if (decoded_len == FRAME_SIZE_RGB565) {
+                    // Valid frame - copy to frame buffer
                     uint8_t target = 1 - read_buf;
-                    size_t decoded = base64_decode(recv_buffer, recv_pos,
-                                                   (uint8_t*)frame_buffer[target]);
+                    memcpy(frame_buffer[target], decode_buffer, FRAME_SIZE_RGB565);
 
-                    if (decoded == FRAME_SIZE_RGB565) {
-                        write_buf = target;
-                        new_frame = true;
-                        Serial.write('K');  // ACK
-                    } else {
-                        Serial.write('E');
-                    }
-                } else {
-                    Serial.write('E');
+                    write_buf = target;
+                    new_frame = true;
                 }
+                // Invalid packets are silently discarded
             }
+            // Reset for next packet
             recv_pos = 0;
 
-        } else if (c != '\r') {
-            if (recv_pos < RECV_BUFFER_SIZE - 1) {
+        } else {
+            // Accumulate COBS-encoded data
+            if (recv_pos < RECV_BUFFER_SIZE) {
                 recv_buffer[recv_pos++] = c;
             } else {
+                // Buffer overflow - discard packet and reset
                 recv_pos = 0;
             }
         }

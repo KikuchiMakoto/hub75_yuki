@@ -103,26 +103,14 @@ class SerialDevice(BaseDevice):
             self._serial = None
     
     def send(self, data: bytes, wait_ack: bool = True) -> bool:
-        """Send data to the device."""
+        """Send data to the device (wait_ack ignored, kept for compatibility)."""
         if not self._serial:
             raise RuntimeError("Not connected")
-        
+
         try:
             self._serial.write(data)
-            
-            if wait_ack:
-                ack = self._serial.read(1)
-                if ack == b'K':
-                    return True
-                elif ack == b'E':
-                    print("Device error")
-                    return False
-                else:
-                    # Timeout or unexpected response
-                    return False
-            
             return True
-            
+
         except serial.SerialException as e:
             print(f"Serial error: {e}")
             return False

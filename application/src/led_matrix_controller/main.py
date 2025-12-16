@@ -131,12 +131,7 @@ Examples:
     perf_group.add_argument(
         "--no-ack",
         action="store_true",
-        help="Don't wait for ACK (faster but may drop frames)"
-    )
-    perf_group.add_argument(
-        "--base64",
-        action="store_true",
-        help="Use Base64 encoding instead of binary (slower, for compatibility)"
+        help="Deprecated (ACK is no longer used)"
     )
     
     args = parser.parse_args()
@@ -150,12 +145,11 @@ Examples:
     try:
         # Create device
         device = create_device(args)
-        
-        # Create controller
+
+        # Create controller (now uses COBS encoding)
         controller = LEDMatrixController(
             device=device,
-            brightness=args.brightness,
-            binary_mode=not args.base64
+            brightness=args.brightness
         )
         
         # Connect
