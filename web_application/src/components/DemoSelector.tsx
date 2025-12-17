@@ -1,5 +1,5 @@
 import React from 'react';
-import { DemoType } from '../types';
+import type { DemoType } from '../types';
 
 interface DemoSelectorProps {
   onSelectDemo: (demo: DemoType) => void;

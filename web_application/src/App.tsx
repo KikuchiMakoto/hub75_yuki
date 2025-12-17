@@ -4,7 +4,7 @@ import { loadImage, VideoPlayer } from './lib/media';
 import { generateDemoFrame } from './lib/demos';
 import { DropZone } from './components/DropZone';
 import { DemoSelector } from './components/DemoSelector';
-import { DemoType } from './types';
+import type { DemoType } from './types';
 
 type Mode = 'idle' | 'image' | 'video' | 'demo';
 
