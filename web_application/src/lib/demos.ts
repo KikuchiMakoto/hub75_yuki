@@ -1,4 +1,4 @@
-import { DISPLAY_WIDTH, DISPLAY_HEIGHT, DemoType } from '../types';
+import { DISPLAY_WIDTH, DISPLAY_HEIGHT, type DemoType } from '../types';
 
 /**
  * Generate demo animation frame
