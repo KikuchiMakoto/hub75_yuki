@@ -130,7 +130,7 @@ application/
 このアプリケーションは以下のRP2040ファームウェアと連携します:
 - [firmware/](../firmware/) ディレクトリ参照
 
-## ffmepg動画変換コマンドサンプル
+## ffmpeg動画変換コマンドサンプル
 
 128x32用
 ```powershell
