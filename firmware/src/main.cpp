@@ -89,10 +89,10 @@ size_t cobs_decode(const uint8_t* input, size_t len, uint8_t* output, size_t max
 // ============================================
 // Frame Buffers
 // ============================================
-static uint16_t frame_buffer[2][DISPLAY_WIDTH * DISPLAY_HEIGHT];
-static volatile uint8_t write_buf = 0;
-static volatile uint8_t read_buf = 0;
-static volatile bool new_frame = false;
+// Simplified single-buffer approach for stable operation
+// (Reference: LED_Matrix_firmware_K00798)
+static uint16_t frame_buffer[DISPLAY_WIDTH * DISPLAY_HEIGHT];
+static volatile bool frame_ready = false;
 
 // BCM bit planes: [row][bit][x] = packed 6-bit RGB
 static uint8_t bcm_planes[SCAN_ROWS][COLOR_DEPTH][DISPLAY_WIDTH];
@@ -425,22 +425,9 @@ void setup() {
 }
 
 void loop() {
-    // Process new frame (moved from Core1 to avoid display flickering)
-    // Note: Memory access may race with Core1's hub75_refresh() but
-    // this trade-off is acceptable for smoother display
-    if (new_frame) {
-        read_buf = write_buf;
-        new_frame = false;
-        convert_to_bcm(frame_buffer[read_buf]);
-    }
-
-    // COBS packet reception: read until 0x00 delimiter
-    // Limit iterations to prevent infinite loop (watchdog protection)
-    int max_iterations = 1024;
-    int iterations = 0;
-
-    while (Serial.available() && iterations < max_iterations) {
-        iterations++;
+    // Simplified frame reception (Reference: LED_Matrix_firmware_K00798)
+    // Process serial data and update display immediately when frame is complete
+    while (Serial.available()) {
         uint8_t c = Serial.read();
 
         if (c == 0x00) {
@@ -452,12 +439,10 @@ void loop() {
 
                 // Verify size matches expected frame size
                 if (decoded_len == FRAME_SIZE_RGB565) {
-                    // Valid frame - copy to frame buffer
-                    uint8_t target = 1 - read_buf;
-                    memcpy(frame_buffer[target], decode_buffer, FRAME_SIZE_RGB565);
-
-                    write_buf = target;
-                    new_frame = true;
+                    // Valid frame - copy directly and convert immediately
+                    // This approach is simpler and more stable for video playback
+                    memcpy(frame_buffer, decode_buffer, FRAME_SIZE_RGB565);
+                    convert_to_bcm(frame_buffer);
                 }
                 // Invalid packets are silently discarded
             }
