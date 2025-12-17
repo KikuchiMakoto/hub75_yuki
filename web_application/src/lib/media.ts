@@ -35,6 +35,7 @@ export async function loadImage(file: File): Promise<ImageData> {
 
 /**
  * Video player for HUB75 display
+ * With simple frame rate control for stable serial transmission
  */
 export class VideoPlayer {
   private video: HTMLVideoElement;
@@ -42,6 +43,8 @@ export class VideoPlayer {
   private ctx: CanvasRenderingContext2D;
   private animationId: number | null = null;
   private onFrame: ((imageData: ImageData) => void) | null = null;
+  private lastFrameTime: number = 0;
+  private targetFps: number = 30; // Target ~30fps for stable serial transmission
 
   constructor() {
     this.video = document.createElement('video');
@@ -54,6 +57,13 @@ export class VideoPlayer {
     this.ctx = this.canvas.getContext('2d')!;
   }
 
+  /**
+   * Set target frame rate (fps)
+   */
+  setTargetFps(fps: number): void {
+    this.targetFps = Math.max(1, Math.min(60, fps));
+  }
+
   async load(file: File): Promise<void> {
     this.video.src = URL.createObjectURL(file);
     await new Promise((resolve, reject) => {
@@ -64,8 +74,9 @@ export class VideoPlayer {
 
   play(onFrame: (imageData: ImageData) => void): void {
     this.onFrame = onFrame;
+    this.lastFrameTime = 0;
     this.video.play();
-    this.renderLoop();
+    this.animationId = requestAnimationFrame(this.renderLoop);
   }
 
   pause(): void {
@@ -82,27 +93,35 @@ export class VideoPlayer {
     this.onFrame = null;
   }
 
-  private renderLoop = (): void => {
+  private renderLoop = (timestamp: number): void => {
     if (!this.onFrame || this.video.paused || this.video.ended) {
       return;
     }
 
-    // Draw video frame to canvas
-    const scale = Math.min(
-      DISPLAY_WIDTH / this.video.videoWidth,
-      DISPLAY_HEIGHT / this.video.videoHeight
-    );
-    const w = this.video.videoWidth * scale;
-    const h = this.video.videoHeight * scale;
-    const x = (DISPLAY_WIDTH - w) / 2;
-    const y = (DISPLAY_HEIGHT - h) / 2;
+    // Simple frame rate limiting
+    const frameInterval = 1000 / this.targetFps;
+    const elapsed = timestamp - this.lastFrameTime;
 
-    this.ctx.fillStyle = 'black';
-    this.ctx.fillRect(0, 0, DISPLAY_WIDTH, DISPLAY_HEIGHT);
-    this.ctx.drawImage(this.video, x, y, w, h);
+    if (elapsed >= frameInterval) {
+      this.lastFrameTime = timestamp - (elapsed % frameInterval);
 
-    const imageData = this.ctx.getImageData(0, 0, DISPLAY_WIDTH, DISPLAY_HEIGHT);
-    this.onFrame(imageData);
+      // Draw video frame to canvas
+      const scale = Math.min(
+        DISPLAY_WIDTH / this.video.videoWidth,
+        DISPLAY_HEIGHT / this.video.videoHeight
+      );
+      const w = this.video.videoWidth * scale;
+      const h = this.video.videoHeight * scale;
+      const x = (DISPLAY_WIDTH - w) / 2;
+      const y = (DISPLAY_HEIGHT - h) / 2;
+
+      this.ctx.fillStyle = 'black';
+      this.ctx.fillRect(0, 0, DISPLAY_WIDTH, DISPLAY_HEIGHT);
+      this.ctx.drawImage(this.video, x, y, w, h);
+
+      const imageData = this.ctx.getImageData(0, 0, DISPLAY_WIDTH, DISPLAY_HEIGHT);
+      this.onFrame(imageData);
+    }
 
     this.animationId = requestAnimationFrame(this.renderLoop);
   };

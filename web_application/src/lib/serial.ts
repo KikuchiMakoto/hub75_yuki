@@ -8,6 +8,7 @@ export class SerialDevice {
   private port: SerialPort | null = null;
   private writer: WritableStreamDefaultWriter<Uint8Array> | null = null;
   private reader: ReadableStreamDefaultReader<Uint8Array> | null = null;
+  private sending: boolean = false;
 
   async connect(baudRate: number = 115200): Promise<void> {
     if (!('serial' in navigator)) {
@@ -116,12 +117,27 @@ export class SerialDevice {
   }
 
   /**
+   * Check if currently sending a frame
+   */
+  isSending(): boolean {
+    return this.sending;
+  }
+
+  /**
    * Send a frame to the display
+   * Returns false if already sending (frame drop) or on error
    */
   async sendFrame(imageData: ImageData): Promise<boolean> {
     if (!this.writer) {
       throw new Error('Not connected to serial device');
     }
+
+    // Frame drop: skip if previous send is still in progress
+    if (this.sending) {
+      return false;
+    }
+
+    this.sending = true;
 
     try {
       // Prepare image (resize and flip)
@@ -145,6 +161,8 @@ export class SerialDevice {
     } catch (error) {
       console.error('Failed to send frame:', error);
       return false;
+    } finally {
+      this.sending = false;
     }
   }
 }
