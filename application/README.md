@@ -130,6 +130,28 @@ application/
 このアプリケーションは以下のRP2040ファームウェアと連携します:
 - [firmware/](../firmware/) ディレクトリ参照
 
-## ライセンス
+## ffmepg動画変換コマンドサンプル
 
-MIT License
+128x32用
+```powershell
+ffmpeg -i input.mp4 `
+-vf "scale=128:-1,crop=128:32" `
+-an `
+-c:v libx264 -qp 0 -preset ultrafast `
+-y `
+output_128x32.mp4
+```
+
+64x64用（右側パネルを180度回転して下付け）
+```powershell
+ffmpeg -i input.mp4 -filter_complex " `
+[0:v]scale=64:64:force_original_aspect_ratio=increase,crop=64:64[base]; `
+[base]split[top][bottom]; `
+[top]crop=64:32:0:0[left]; `
+[bottom]crop=64:32:0:32,hflip,vflip[right]; `
+[left][right]hstack" `
+-an `
+-c:v libx264 -qp 0 -preset ultrafast `
+-y `
+output_64x64.mp4
+```
