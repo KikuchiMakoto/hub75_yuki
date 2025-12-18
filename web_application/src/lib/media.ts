@@ -1,5 +1,8 @@
 import { DISPLAY_WIDTH, DISPLAY_HEIGHT } from '../types';
 
+// Maximum FPS for video playback (internal limit)
+const MAX_VIDEO_FPS = 15;
+
 /**
  * Load image file and convert to ImageData
  */
@@ -36,6 +39,7 @@ export async function loadImage(file: File): Promise<ImageData> {
 /**
  * Video player for HUB75 display
  * With simple frame rate control for stable serial transmission
+ * Maximum frame rate is limited to MAX_VIDEO_FPS (15fps)
  */
 export class VideoPlayer {
   private video: HTMLVideoElement;
@@ -44,7 +48,7 @@ export class VideoPlayer {
   private animationId: number | null = null;
   private onFrame: ((imageData: ImageData) => void) | null = null;
   private lastFrameTime: number = 0;
-  private targetFps: number = 30; // Target ~30fps for stable serial transmission
+  private targetFps: number = MAX_VIDEO_FPS; // Target fps limited to MAX_VIDEO_FPS (15fps)
 
   constructor() {
     this.video = document.createElement('video');
@@ -59,9 +63,10 @@ export class VideoPlayer {
 
   /**
    * Set target frame rate (fps)
+   * Maximum is limited to MAX_VIDEO_FPS (15fps)
    */
   setTargetFps(fps: number): void {
-    this.targetFps = Math.max(1, Math.min(60, fps));
+    this.targetFps = Math.max(1, Math.min(MAX_VIDEO_FPS, fps));
   }
 
   async load(file: File): Promise<void> {
@@ -70,6 +75,9 @@ export class VideoPlayer {
       this.video.onloadedmetadata = resolve;
       this.video.onerror = reject;
     });
+    // Reset target FPS to maximum allowed (15fps)
+    // Video playback will be limited to this rate
+    this.targetFps = MAX_VIDEO_FPS;
   }
 
   play(onFrame: (imageData: ImageData) => void): void {

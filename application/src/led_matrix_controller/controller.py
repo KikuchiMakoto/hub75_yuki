@@ -25,6 +25,9 @@ from .devices.base import BaseDevice
 DISPLAY_WIDTH = 128
 DISPLAY_HEIGHT = 32
 
+# Maximum FPS for video playback (internal limit)
+MAX_VIDEO_FPS = 15
+
 
 def cobs_encode(data: bytes) -> bytes:
     """
@@ -274,7 +277,11 @@ class LEDMatrixController:
         loop: bool = False
     ):
         """
-        Play a video file with frame dropping to maintain real-time playback.
+        Play a video file with frame dropping to maintain target frame rate.
+
+        The maximum frame rate is limited to MAX_VIDEO_FPS (15fps).
+        If the video's frame rate exceeds this limit, frames are dropped
+        to achieve approximately 15fps output.
 
         Args:
             path: Path to video file
@@ -289,26 +296,29 @@ class LEDMatrixController:
 
         video_fps = cap.get(cv2.CAP_PROP_FPS) or 30
 
-        fps_str = f"{video_fps:.1f} (with frame drop)"
+        # Limit to MAX_VIDEO_FPS (15fps)
+        effective_fps = min(video_fps, MAX_VIDEO_FPS)
+        frame_interval = 1.0 / effective_fps
 
         print(f"Playing: {path}")
-        print(f"Mode: COBS, Target FPS: {fps_str}")
+        print(f"Video FPS: {video_fps:.1f}, Output FPS: {effective_fps:.1f}")
         print("Press Ctrl+C to stop")
 
         try:
             playback_start = time.time()
             frames_sent = 0
             frames_dropped = 0
+            next_frame_time = playback_start
 
             while True:
-                # Calculate ideal frame number based on elapsed time
+                # Calculate ideal frame number based on elapsed time (using original video FPS)
                 elapsed = time.time() - playback_start
                 ideal_frame = int(elapsed * video_fps)
 
                 # Get current frame position
                 current_frame = int(cap.get(cv2.CAP_PROP_POS_FRAMES))
 
-                # Skip frames if we're behind (frame dropping)
+                # Skip frames if we're behind (frame dropping based on video's original FPS)
                 if ideal_frame > current_frame:
                     frames_to_skip = ideal_frame - current_frame
                     frames_dropped += frames_to_skip
@@ -319,6 +329,7 @@ class LEDMatrixController:
                     if loop:
                         cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
                         playback_start = time.time()
+                        next_frame_time = playback_start
                         frames_sent = 0
                         frames_dropped = 0
                         continue
@@ -329,10 +340,16 @@ class LEDMatrixController:
                 self.send_frame(frame)
                 frames_sent += 1
 
-                # Print FPS and dropped frames periodically
+                # Print progress periodically
                 if self._frame_count == 0:
                     drop_rate = (frames_dropped / (frames_sent + frames_dropped) * 100) if (frames_sent + frames_dropped) > 0 else 0
-                    print(f"\rFPS: {self.fps:.1f}, Dropped: {frames_dropped} ({drop_rate:.1f}%)  ", end='', flush=True)
+                    print(f"\rSent: {frames_sent}, Dropped: {frames_dropped} ({drop_rate:.1f}%)  ", end='', flush=True)
+
+                # Wait until next frame time to maintain target FPS
+                next_frame_time += frame_interval
+                sleep_time = next_frame_time - time.time()
+                if sleep_time > 0:
+                    time.sleep(sleep_time)
 
         finally:
             cap.release()
