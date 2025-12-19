@@ -1,7 +1,7 @@
 import { DISPLAY_WIDTH, DISPLAY_HEIGHT } from '../types';
 
 // Maximum FPS for video playback (internal limit)
-const MAX_VIDEO_FPS = 15;
+const MAX_VIDEO_FPS = 18;
 
 /**
  * Load image file and convert to ImageData
