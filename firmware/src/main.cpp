@@ -28,6 +28,7 @@
 
 #if HUB75_USE_PIO
 #include <hardware/pio.h>
+#include <hardware/dma.h>
 #include "hub75.pio.h"
 #endif
 
@@ -114,6 +115,13 @@ static volatile bool boot_complete = false;
 // PIO instance and state machine
 static PIO hub75_pio = pio0;
 static uint sm_data = 0;
+
+// DMA channel for PIO data transfer
+static int dma_chan = -1;
+
+// Double buffer for DMA (ping-pong)
+// Each pixel is expanded from 8-bit to 32-bit for PIO FIFO
+static uint32_t dma_buffer[2][DISPLAY_WIDTH];
 #endif
 
 // ============================================
@@ -201,6 +209,33 @@ void hub75_pio_init() {
     uint offset = pio_add_program(hub75_pio, &hub75_data_program);
     hub75_data_program_init(hub75_pio, sm_data, offset, PIN_R0, PIN_CLK);
 }
+
+// ============================================
+// DMA Initialize - for PIO data transfer
+// ============================================
+void hub75_dma_init() {
+    // Claim a free DMA channel
+    dma_chan = dma_claim_unused_channel(true);
+
+    // Configure DMA channel
+    dma_channel_config c = dma_channel_get_default_config(dma_chan);
+
+    // Transfer 32-bit words
+    channel_config_set_transfer_data_size(&c, DMA_SIZE_32);
+
+    // Increment read address, fixed write address (PIO FIFO)
+    channel_config_set_read_increment(&c, true);
+    channel_config_set_write_increment(&c, false);
+
+    // Pace transfers based on PIO TX FIFO
+    channel_config_set_dreq(&c, pio_get_dreq(hub75_pio, sm_data, true));
+
+    // Save config (will be used for each transfer)
+    dma_channel_set_config(dma_chan, &c, false);
+
+    // Set write address to PIO TX FIFO (fixed for all transfers)
+    dma_channel_set_write_addr(dma_chan, &hub75_pio->txf[sm_data], false);
+}
 #endif
 
 // ============================================
@@ -227,47 +262,78 @@ static inline void __not_in_flash_func(set_row_address)(int row) {
 
 #if HUB75_USE_PIO
 // ============================================
-// HUB75 Refresh - PIO version
+// Prepare DMA buffer for a specific row/bit
+// ============================================
+static inline void __not_in_flash_func(prepare_dma_buffer)(int buf_idx, int row, int bit) {
+    uint8_t* row_data = bcm_planes[row][bit];
+    uint32_t* buf = dma_buffer[buf_idx];
+    for (int x = 0; x < DISPLAY_WIDTH; x++) {
+        // Reverse order for right-to-left shifting
+        buf[x] = row_data[DISPLAY_WIDTH - 1 - x];
+    }
+}
+
+// ============================================
+// HUB75 Refresh - PIO + DMA version (Phase 2)
+// Double-buffered: prepares next row while current row is being transferred
 // ============================================
 void __not_in_flash_func(hub75_refresh)() {
+    int buf_idx = 0;
+
     for (int bit = 0; bit < COLOR_DEPTH; bit++) {
         uint32_t delay_us = 1 << bit;
 
         for (int row = 0; row < SCAN_ROWS; row++) {
-            // 1. Disable output
+            // 1. Disable output (blanking)
             sio_hw->gpio_set = OE_MASK;
 
-            // 2. Shift out pixel data via PIO (right to left for chained panels)
-            uint8_t* row_data = bcm_planes[row][bit];
-            for (int x = DISPLAY_WIDTH - 1; x >= 0; x--) {
-                while (pio_sm_is_tx_fifo_full(hub75_pio, sm_data)) {
-                    tight_loop_contents();
-                }
-                pio_sm_put(hub75_pio, sm_data, row_data[x]);
+            // 2. Prepare current row's DMA buffer
+            prepare_dma_buffer(buf_idx, row, bit);
+
+            // 3. Start DMA transfer
+            dma_channel_set_read_addr(dma_chan, dma_buffer[buf_idx], false);
+            dma_channel_set_trans_count(dma_chan, DISPLAY_WIDTH, true);
+
+            // 4. While DMA is running, prepare next buffer (pipelining)
+            int next_buf = 1 - buf_idx;
+            int next_row = row + 1;
+            int next_bit = bit;
+            if (next_row >= SCAN_ROWS) {
+                next_row = 0;
+                next_bit = bit + 1;
+            }
+            if (next_bit < COLOR_DEPTH) {
+                prepare_dma_buffer(next_buf, next_row, next_bit);
             }
 
-            // Wait for shift complete
+            // 5. Wait for DMA complete
+            dma_channel_wait_for_finish_blocking(dma_chan);
+
+            // 6. Wait for PIO to finish shifting
             while (!pio_sm_is_tx_fifo_empty(hub75_pio, sm_data)) {
                 tight_loop_contents();
             }
             __asm volatile("nop\nnop\nnop\nnop");
 
-            // 3. Set row address
+            // 7. Set row address
             set_row_address(row);
 
-            // 4. Latch pulse
+            // 8. Latch pulse
             sio_hw->gpio_set = LAT_MASK;
             __asm volatile("nop\nnop\nnop\nnop");
             sio_hw->gpio_clr = LAT_MASK;
 
-            // 5. Enable output
+            // 9. Enable output
             sio_hw->gpio_clr = OE_MASK;
 
-            // 6. BCM delay
+            // 10. BCM delay (display time for this bit plane)
             delayMicroseconds(delay_us);
 
-            // 7. Disable output before next row
+            // 11. Disable output before next row
             sio_hw->gpio_set = OE_MASK;
+
+            // Switch to next buffer
+            buf_idx = next_buf;
         }
     }
 }
@@ -404,6 +470,9 @@ void setup1() {
 #if HUB75_USE_PIO
     // Now initialize PIO (takes over GP0-5 and GP6 from GPIO)
     hub75_pio_init();
+
+    // Initialize DMA for PIO data transfer
+    hub75_dma_init();
 #endif
 }
 
