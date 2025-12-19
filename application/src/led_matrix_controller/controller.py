@@ -26,7 +26,7 @@ DISPLAY_WIDTH = 128
 DISPLAY_HEIGHT = 32
 
 # Maximum FPS for video playback (internal limit)
-MAX_VIDEO_FPS = 15
+MAX_VIDEO_FPS = 18
 
 
 def cobs_encode(data: bytes) -> bytes:
