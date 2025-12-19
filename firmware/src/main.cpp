@@ -31,7 +31,7 @@
 #include "hub75.pio.h"
 #endif
 
-#ifdef USE_TINYUSB
+#if USE_TINYUSB
 #include <Adafruit_TinyUSB.h>
 #endif
 #include "hub75_config.h"

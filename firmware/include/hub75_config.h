@@ -13,8 +13,14 @@
 // Display Configuration
 // ============================================
 #define DISPLAY_WIDTH   128
+
+// Display height: 32 or 64 (configurable via build flags)
+// Use -D DISPLAY_HEIGHT=64 in platformio.ini for 128x64 panels
+#ifndef DISPLAY_HEIGHT
 #define DISPLAY_HEIGHT  32
-#define SCAN_ROWS       (DISPLAY_HEIGHT / 2)  // 16 for 1/16 scan
+#endif
+
+#define SCAN_ROWS       (DISPLAY_HEIGHT / 2)  // 16 for 32-row, 32 for 64-row
 
 // Color depth for BCM (Binary Code Modulation)
 #define COLOR_DEPTH     6   // 6-bit = 64 levels per color
@@ -47,11 +53,13 @@
 // ============================================
 // Buffer sizes
 // ============================================
-#define FRAME_SIZE_RGB565   (DISPLAY_WIDTH * DISPLAY_HEIGHT * 2)  // 8192 bytes
+// Frame size in bytes: 128x32=8KB, 128x64=16KB
+#define FRAME_SIZE_RGB565   (DISPLAY_WIDTH * DISPLAY_HEIGHT * 2)
 
 // COBS encoding overhead: 1 byte per 254 bytes + 1
-// Max encoded size: 8192 + ceil(8192/254) + 1 = 8226
-// Add margin for safety
-#define RECV_BUFFER_SIZE    8300  // COBS encoded frame + margin
+// Max encoded size: FRAME_SIZE + ceil(FRAME_SIZE/254) + 1
+// 128x32: 8192 + 33 = 8225 -> 8300 with margin
+// 128x64: 16384 + 65 = 16449 -> 16600 with margin
+#define RECV_BUFFER_SIZE    (FRAME_SIZE_RGB565 + (FRAME_SIZE_RGB565 / 254) + 200)
 
 #endif // HUB75_CONFIG_H
