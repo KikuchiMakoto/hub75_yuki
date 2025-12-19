@@ -56,15 +56,14 @@ extern "C" {
 // Number of CDC interfaces
 #define CFG_TUD_CDC             1
 
-// CDC Endpoint buffer size (hardware packet size)
-// USB Full Speed max is 64 bytes per packet
-// Larger values here don't help much for Full Speed
-#define CFG_TUD_CDC_EP_BUFSIZE  64
+// CDC Endpoint transfer buffer size
+// Larger = faster transfers (reduces overhead per tud_task() call)
+// 512 is recommended for high-throughput applications
+#define CFG_TUD_CDC_EP_BUFSIZE  512
 
 // CDC RX FIFO size - SOFTWARE buffer for received data
 // This is the key setting for high throughput!
 // 16KB = one full 128x64 RGB565 frame
-// Set to 8KB for 128x32 or 16KB for 128x64
 #define CFG_TUD_CDC_RX_BUFSIZE  16384
 
 // CDC TX FIFO size - for sending data back to host
