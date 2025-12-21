@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { SerialDevice } from './lib/serial';
 import { loadImage, VideoPlayer } from './lib/media';
+import { VideoProcessor } from './lib/videoProcessor';
 import { generateDemoFrame } from './lib/demos';
 import { DropZone } from './components/DropZone';
 import { DemoSelector } from './components/DemoSelector';
@@ -16,6 +17,7 @@ function App() {
 
   const serialRef = useRef<SerialDevice>(new SerialDevice());
   const videoPlayerRef = useRef<VideoPlayer>(new VideoPlayer());
+  const videoProcessorRef = useRef<VideoProcessor>(new VideoProcessor());
   const demoAnimationRef = useRef<number | null>(null);
   const fpsCounterRef = useRef({ count: 0, lastTime: Date.now() });
 
@@ -89,8 +91,17 @@ function App() {
       }
     } else if (file.type.startsWith('video/')) {
       try {
+        setStatus('FFmpegを読み込み中...');
+        await videoProcessorRef.current.load();
+
+        setStatus('動画のメタデータを取得中...');
+        const metadata = await videoProcessorRef.current.getVideoMetadata(file);
+
+        setStatus(`動画をリサイズ中... (${metadata.width}x${metadata.height} → 128x32)`);
+        const processedBlob = await videoProcessorRef.current.resizeVideo(file);
+
         setStatus('動画を読み込み中...');
-        await videoPlayerRef.current.load(file);
+        await videoPlayerRef.current.load(processedBlob);
         setStatus('動画を再生中');
         setMode('video');
         videoPlayerRef.current.play(async (imageData) => {
