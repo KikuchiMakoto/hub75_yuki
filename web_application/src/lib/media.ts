@@ -69,13 +69,13 @@ export class VideoPlayer {
     this.targetFps = Math.max(1, Math.min(MAX_VIDEO_FPS, fps));
   }
 
-  async load(file: File): Promise<void> {
+  async load(file: File | Blob): Promise<void> {
     this.video.src = URL.createObjectURL(file);
     await new Promise((resolve, reject) => {
       this.video.onloadedmetadata = resolve;
       this.video.onerror = reject;
     });
-    // Reset target FPS to maximum allowed (15fps)
+    // Reset target FPS to maximum allowed (18fps)
     // Video playback will be limited to this rate
     this.targetFps = MAX_VIDEO_FPS;
   }

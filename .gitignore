@@ -56,6 +56,9 @@ web_application/node_modules/
 web_application/dist/
 web_application/.vite/
 
+# GitHub Pages (built by GitHub Actions)
+docs/
+
 # Bun
 *.bun
 .bun/
