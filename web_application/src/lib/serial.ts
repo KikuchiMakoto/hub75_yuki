@@ -84,32 +84,27 @@ export class SerialDevice {
   }
 
   /**
-   * Resize and flip image to display dimensions
+   * Flip image horizontally for HUB75 shift register order
+   * Input imageData is expected to already be at DISPLAY_WIDTH x DISPLAY_HEIGHT
    */
   private prepareImage(imageData: ImageData): ImageData {
+    // Horizontal flip for HUB75 shift register order
+    // Data is shifted right-to-left, last pixel shifted stays at left edge
     const canvas = document.createElement('canvas');
     canvas.width = DISPLAY_WIDTH;
     canvas.height = DISPLAY_HEIGHT;
     const ctx = canvas.getContext('2d')!;
 
-    // Draw and resize image
-    ctx.drawImage(
-      createImageBitmap(imageData) as any,
-      0,
-      0,
-      imageData.width,
-      imageData.height,
-      0,
-      0,
-      DISPLAY_WIDTH,
-      DISPLAY_HEIGHT
-    );
+    // Put the original image data on canvas first
+    ctx.putImageData(imageData, 0, 0);
 
-    // Horizontal flip for HUB75 shift register order
+    // Create flipped canvas
     const flippedCanvas = document.createElement('canvas');
     flippedCanvas.width = DISPLAY_WIDTH;
     flippedCanvas.height = DISPLAY_HEIGHT;
     const flippedCtx = flippedCanvas.getContext('2d')!;
+
+    // Flip horizontally and draw
     flippedCtx.scale(-1, 1);
     flippedCtx.drawImage(canvas, -DISPLAY_WIDTH, 0);
 

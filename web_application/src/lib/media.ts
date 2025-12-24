@@ -53,6 +53,7 @@ export class VideoPlayer {
   constructor() {
     this.video = document.createElement('video');
     this.video.muted = true;
+    // Always loop videos automatically in web application
     this.video.loop = true;
 
     this.canvas = document.createElement('canvas');
@@ -71,6 +72,8 @@ export class VideoPlayer {
 
   async load(file: File | Blob): Promise<void> {
     this.video.src = URL.createObjectURL(file);
+    // Ensure video always loops in web application
+    this.video.loop = true;
     await new Promise((resolve, reject) => {
       this.video.onloadedmetadata = resolve;
       this.video.onerror = reject;
