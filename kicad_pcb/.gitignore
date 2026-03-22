@@ -9,3 +9,4 @@
 *.ses
 *.net
 __pycache__/
+fp-info-cache
