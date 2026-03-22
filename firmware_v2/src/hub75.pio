@@ -1,0 +1,8 @@
+.program hub75_data
+.side_set 1
+
+.wrap_target
+    pull block side 0
+    out pins, 6 side 0 [7]
+    jmp 0 side 1 [7]
+.wrap
