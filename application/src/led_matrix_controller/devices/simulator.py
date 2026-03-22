@@ -4,7 +4,6 @@ Simulator Devices
 Terminal output and image file output for testing without hardware.
 """
 
-import base64
 from pathlib import Path
 from typing import Optional
 
@@ -16,6 +15,54 @@ from .base import BaseDevice
 # Display configuration
 DISPLAY_WIDTH = 128
 DISPLAY_HEIGHT = 32
+FRAME_SIZE_RGB565 = DISPLAY_WIDTH * DISPLAY_HEIGHT * 2
+
+
+def _cobs_decode(encoded: bytes) -> bytes:
+    """Decode COBS-encoded payload (without 0x00 terminator)."""
+    if not encoded:
+        return b""
+
+    output = bytearray()
+    index = 0
+    size = len(encoded)
+
+    while index < size:
+        code = encoded[index]
+        if code == 0:
+            raise ValueError("invalid COBS stream: zero byte in payload")
+
+        index += 1
+        chunk_end = index + code - 1
+        if chunk_end > size:
+            raise ValueError("invalid COBS stream: block length overflow")
+
+        output.extend(encoded[index:chunk_end])
+        index = chunk_end
+
+        if code != 0xFF and index < size:
+            output.append(0)
+
+    return bytes(output)
+
+
+def _decode_frame(data: bytes) -> bytes:
+    """Decode one `COBS(payload) + 0x00` frame and validate size."""
+    if not data:
+        raise ValueError("empty frame")
+
+    if data[-1] == 0:
+        encoded = data[:-1]
+    else:
+        encoded = data
+
+    raw_data = _cobs_decode(encoded)
+    if len(raw_data) != FRAME_SIZE_RGB565:
+        raise ValueError(
+            f"invalid frame size: {len(raw_data)} bytes (expected {FRAME_SIZE_RGB565})"
+        )
+
+    return raw_data
 
 
 class TerminalDevice(BaseDevice):
@@ -54,9 +101,8 @@ class TerminalDevice(BaseDevice):
             return False
         
         try:
-            # Decode Base64
-            b64_data = data.rstrip(b'\n')
-            raw_data = base64.b64decode(b64_data)
+            # Decode COBS frame (RGB565 + 0x00 delimiter)
+            raw_data = _decode_frame(data)
             
             # Convert to RGB565 array
             rgb565 = np.frombuffer(raw_data, dtype='<u2').reshape(
@@ -160,9 +206,8 @@ class ImageDevice(BaseDevice):
             return False
         
         try:
-            # Decode Base64
-            b64_data = data.rstrip(b'\n')
-            raw_data = base64.b64decode(b64_data)
+            # Decode COBS frame (RGB565 + 0x00 delimiter)
+            raw_data = _decode_frame(data)
             
             # Convert to RGB565 array
             rgb565 = np.frombuffer(raw_data, dtype='<u2').reshape(
