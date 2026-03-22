@@ -4,13 +4,15 @@
 
 ## プロジェクト構成
 
-このプロジェクトは、**Application**、**Web Application**、**Firmware**、**KiCad PCB** の4つのコンポーネントで構成されています：
+このプロジェクトは、**Application**、**Web Application**、**Firmware**、**Firmware(CH32V305)**、**KiCad PCB** の5つのコンポーネントで構成されています：
 
 ```
 ├── application/        # Python制御アプリケーション (PC側)
 │   └── src/           # LED Matrix Controller (画像/動画/カメラ/テキスト表示)
 ├── web_application/   # Webアプリケーション (ブラウザ側)
 │   └── src/           # React + TypeScript (Web Serial API対応)
+├── firmware_ch32v305/ # CH32V305ファームウェア (高速化アーキテクチャ)
+│   └── src/           # USBHS受信/COBS復元/BCM変換パイプライン
 ├── kicad_pcb/         # KiCad設計データ (基板レイアウト/ライブラリ)
 └── firmware/          # RP2040ファームウェア (マイコン側)
     └── src/           # HUB75ドライバ (PlatformIO/Arduino)
@@ -18,16 +20,21 @@
 
 ### 役割分担
 
-- **Firmware** (`firmware/`): RP2040上で動作するC++コード。HUB75パネルの駆動とUSB通信のみを担当
-- **Application** (`application/`): PC上で動作するPythonコード。画像処理、動画再生、デモ生成などを担当
+- **Firmware** (`firmware/`): RP2040上で動作するC++コード。HUB75パネルの駆動、PIO/DMAによる高速出力、USB CDCによるCOBSデータ受信、RGB565からBCM変換を担当
+- **Application** (`application/`): PC上で動作するPythonコード。画像/動画読み込み、リサイズ、RGB565変換、COBSエンコード、シリアル通信を担当
 - **Web Application** (`web_application/`): ブラウザで動作するWebアプリケーション。Web Serial APIを使用してUSB経由で制御
 - **KiCad PCB** (`kicad_pcb/`): 回路図シンボル/フットプリント/基板レイアウトなどのハードウェア設計データを管理
 
 ## 特徴
 
-- **複数入力対応**: 画像、動画、デモアニメーション
-- **高速表示**: PIO (Programmable I/O) による高速シフト出力
-- **デュアルコア**: Core0でUSB受信、Core1でパネル駆動
+- **複数入力対応**: 画像、動画、デモアニメーション、カメラ入力
+- **高速表示**: PIO (Programmable I/O) + DMAによる高速シフト出力
+- **デュアルコア設計**: Core0でUSB受信+BCM変換、Core1でパネル駆動のみ（フリッカー防止）
+- **RGB565フォーマット**: 16ビットカラー（5-6-5ビット）による効率的な転送
+- **COBSエンコーディング**: Base64より効率的なデータ転送
+- **高画質**: 6ビットBCM（64階調）+ Gamma補正（2.2）
+- **柔軟なビルド**: PIOモードとCPU GPIOモードの切り替え可能
+- **128x32/128x64対応**: ビルドフラグでパネルサイズ変更可能
 - **簡単セットアップ**: PlatformIOとuvで簡単にビルド・実行
 
 ## クイックスタート

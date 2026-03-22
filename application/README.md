@@ -4,9 +4,10 @@
 
 ## 特徴
 
-- **複数入力対応**: 画像、動画、Webカメラ、テキスト、デモアニメーション
+- **複数入力対応**: 画像、動画、デモアニメーション、単色塗りつぶし
 - **アスペクト比保持リサイズ**: 入力画像を128x32に自動変換
-- **RGB565エンコード**: Base64 + 改行でRP2040に送信
+- **RGB565エンコーディング**: 16bitカラーでメモリ効率化
+- **COBSプロトコル**: データ転送の信頼性確保
 - **複数出力デバイス**: シリアル、ターミナルシミュレータ、画像出力
 
 ## 必要条件
@@ -44,8 +45,8 @@ uv run led-matrix --video movie.mp4
 # 動画ループ再生
 uv run led-matrix --video movie.mp4 --loop
 
-# Webカメラ
-uv run led-matrix --camera
+# 単色塗りつぶし (赤色)
+uv run led-matrix --fill 255,0,0
 ```
 
 
@@ -73,39 +74,63 @@ uv run led-matrix --demo clock
 ```bash
 # シリアルポート指定
 uv run led-matrix --port COM3 --demo rainbow
+
+# ターミナルシミュレータ (ハードウェアなしで動作確認)
+uv run led-matrix --device terminal --demo rainbow
+
+# 画像出力デバイス (フレームをPNGとして保存)
+uv run led-matrix --device image --demo rainbow --output-dir frames
 ```
 
 ## コマンドラインオプション
 
 ```
 デバイスオプション:
-  --port PORT                       シリアルポート (自動検出)
-  --baudrate BAUDRATE               ボーレート (default: 115200)
+  --device, -d {serial,terminal,image}  出力デバイス (default: serial)
+  --port, -p PORT                       シリアルポート (自動検出)
+  --baudrate, -b BAUDRATE               ボーレート (default: 115200)
+  --output-dir                          画像出力ディレクトリ (default: output)
 
 入力オプション (排他):
-  --image FILE                      画像ファイル
-  --video FILE                      動画ファイル
-  --demo {rainbow,gradient,plasma,fire,matrix,clock}  デモ
+  --image, -i FILE                  画像ファイル表示
+  --video, -v FILE                  動画ファイル再生
+  --demo {rainbow,gradient,plasma,fire,matrix,clock}  デモアニメーション
+  --fill, -f R,G,B                  単色塗りつぶし (例: 255,0,0)
 
 表示オプション:
-  --loop                            動画ループ
+  --loop                            動画ループ再生
   --fps FPS                         デモFPS (default: 30)
   --brightness BRIGHTNESS           明るさ 0.0-1.0 (default: 1.0)
 ```
 
 ## 通信プロトコル
 
+### データフォーマット
+- **RGB565**: 16bitカラー形式
+  - 赤: 5bit (0-31)
+  - 緑: 6bit (0-63)
+  - 青: 5bit (0-31)
+  - データサイズ: 128 × 32 × 2 = 8192 bytes
+
+### エンコーディング
+- **COBS (Consistent Overhead Byte Stuffing)**: プロトコルのエンコーディング方式
+  - ゼロバイトをデータストリームから除去し、オーバーヘッドコードに置換
+  - パケットはゼロバイトで終了
+  - バイナリデータの安全な転送を実現
+
+### 転送フロー
 ```
 PC → RP2040:
-    [Base64(RGB565データ)]\n
-
-    データサイズ: 128 × 32 × 2 = 8192 bytes
-    Base64後: 約 10924 bytes + 改行
+    [COBSエンコードされたRGB565データ][0x00]
 
 RP2040 → PC:
-    'K' = ACK (成功)
-    'E' = Error (失敗)
+    なし（非同期転送）
 ```
+
+### COBSエンコーディングの利点
+- ストリーミング転送に適した明確なパケット境界
+- 小さなオーバーヘッド（最大約25%）
+- データ内の任意のバイナリ値を安全に転送可能
 
 ## プロジェクト構造
 
