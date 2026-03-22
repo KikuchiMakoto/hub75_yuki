@@ -8,7 +8,11 @@ export class SerialDevice {
   private port: SerialPort | null = null;
   private writer: WritableStreamDefaultWriter<Uint8Array> | null = null;
   private reader: ReadableStreamDefaultReader<Uint8Array> | null = null;
-  private sending: boolean = false;
+  private queue: Uint8Array[] = [];
+  private readonly maxQueueDepth: number = 3;
+  private sendLoopPromise: Promise<void> | null = null;
+  private droppedFrames: number = 0;
+  private sentFrames: number = 0;
 
   async connect(baudRate: number = 115200): Promise<void> {
     if (!('serial' in navigator)) {
@@ -35,6 +39,11 @@ export class SerialDevice {
   }
 
   async disconnect(): Promise<void> {
+    if (this.sendLoopPromise) {
+      await this.sendLoopPromise;
+      this.sendLoopPromise = null;
+    }
+
     if (this.writer) {
       this.writer.releaseLock();
       this.writer = null;
@@ -87,23 +96,19 @@ export class SerialDevice {
    * Resize and flip image to display dimensions
    */
   private prepareImage(imageData: ImageData): ImageData {
+    const sourceCanvas = document.createElement('canvas');
+    sourceCanvas.width = imageData.width;
+    sourceCanvas.height = imageData.height;
+    const sourceCtx = sourceCanvas.getContext('2d')!;
+    sourceCtx.putImageData(imageData, 0, 0);
+
     const canvas = document.createElement('canvas');
     canvas.width = DISPLAY_WIDTH;
     canvas.height = DISPLAY_HEIGHT;
     const ctx = canvas.getContext('2d')!;
 
     // Draw and resize image
-    ctx.drawImage(
-      createImageBitmap(imageData) as any,
-      0,
-      0,
-      imageData.width,
-      imageData.height,
-      0,
-      0,
-      DISPLAY_WIDTH,
-      DISPLAY_HEIGHT
-    );
+    ctx.drawImage(sourceCanvas, 0, 0, imageData.width, imageData.height, 0, 0, DISPLAY_WIDTH, DISPLAY_HEIGHT);
 
     // Horizontal flip for HUB75 shift register order
     const flippedCanvas = document.createElement('canvas');
@@ -120,24 +125,42 @@ export class SerialDevice {
    * Check if currently sending a frame
    */
   isSending(): boolean {
-    return this.sending;
+    return this.sendLoopPromise !== null;
+  }
+
+  getQueueMetrics(): { queued: number; dropped: number; sent: number } {
+    return {
+      queued: this.queue.length,
+      dropped: this.droppedFrames,
+      sent: this.sentFrames,
+    };
+  }
+
+  private async runSendLoop(): Promise<void> {
+    while (this.queue.length > 0) {
+      if (!this.writer) {
+        this.queue = [];
+        break;
+      }
+
+      const nextPacket = this.queue.shift();
+      if (!nextPacket) {
+        continue;
+      }
+
+      await this.writer.write(nextPacket);
+      this.sentFrames++;
+    }
   }
 
   /**
    * Send a frame to the display
-   * Returns false if already sending (frame drop) or on error
+   * Applies bounded queueing and drops oldest frame on overflow
    */
   async sendFrame(imageData: ImageData): Promise<boolean> {
     if (!this.writer) {
       throw new Error('Not connected to serial device');
     }
-
-    // Frame drop: skip if previous send is still in progress
-    if (this.sending) {
-      return false;
-    }
-
-    this.sending = true;
 
     try {
       // Prepare image (resize and flip)
@@ -154,15 +177,24 @@ export class SerialDevice {
       packet.set(encoded, 0);
       packet[encoded.length] = 0x00;
 
-      // Send
-      await this.writer.write(packet);
+      // Keep latency bounded under load by dropping oldest queued frame.
+      if (this.queue.length >= this.maxQueueDepth) {
+        this.queue.shift();
+        this.droppedFrames++;
+      }
+
+      this.queue.push(packet);
+
+      if (!this.sendLoopPromise) {
+        this.sendLoopPromise = this.runSendLoop().finally(() => {
+          this.sendLoopPromise = null;
+        });
+      }
 
       return true;
     } catch (error) {
       console.error('Failed to send frame:', error);
       return false;
-    } finally {
-      this.sending = false;
     }
   }
 }

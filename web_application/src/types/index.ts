@@ -12,4 +12,5 @@ export interface LEDMatrixController {
   disconnect(): Promise<void>;
   sendFrame(imageData: ImageData): Promise<boolean>;
   isConnected(): boolean;
+  getQueueMetrics?(): { queued: number; dropped: number; sent: number };
 }

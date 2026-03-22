@@ -14,6 +14,8 @@ function App() {
   const [mode, setMode] = useState<Mode>('idle');
   const [status, setStatus] = useState('');
   const [fps, setFps] = useState(0);
+  const [txQueue, setTxQueue] = useState(0);
+  const [txDropped, setTxDropped] = useState(0);
 
   const serialRef = useRef<SerialDevice>(new SerialDevice());
   const videoPlayerRef = useRef<VideoPlayer>(new VideoPlayer());
@@ -24,7 +26,7 @@ function App() {
   useEffect(() => {
     return () => {
       stopCurrentMode();
-      if (connected) {
+      if (serialRef.current.isConnected()) {
         serialRef.current.disconnect();
       }
     };
@@ -42,6 +44,10 @@ function App() {
 
   const updateFps = () => {
     fpsCounterRef.current.count++;
+    const metrics = serialRef.current.getQueueMetrics();
+    setTxQueue(metrics.queued);
+    setTxDropped(metrics.dropped);
+
     const now = Date.now();
     const elapsed = now - fpsCounterRef.current.lastTime;
     if (elapsed >= 1000) {
@@ -68,6 +74,8 @@ function App() {
     setConnected(false);
     setStatus('切断しました');
     setFps(0);
+    setTxQueue(0);
+    setTxDropped(0);
   };
 
   const handleFileDrop = async (file: File) => {
@@ -91,17 +99,23 @@ function App() {
       }
     } else if (file.type.startsWith('video/')) {
       try {
-        setStatus('FFmpegを読み込み中...');
-        await videoProcessorRef.current.load();
-
         setStatus('動画のメタデータを取得中...');
         const metadata = await videoProcessorRef.current.getVideoMetadata(file);
 
-        setStatus(`動画をリサイズ中... (${metadata.width}x${metadata.height} → 128x32)`);
-        const processedBlob = await videoProcessorRef.current.resizeVideo(file);
+        let videoBlob: Blob = file;
+        const needsResize = await videoProcessorRef.current.shouldResize(file);
+
+        if (needsResize) {
+          setStatus('FFmpegを読み込み中...');
+          await videoProcessorRef.current.load();
+          setStatus(`動画をリサイズ中... (${metadata.width}x${metadata.height} → 128x32)`);
+          videoBlob = await videoProcessorRef.current.resizeVideo(file);
+        } else {
+          setStatus(`動画を再エンコードせず再生します (${metadata.width}x${metadata.height})`);
+        }
 
         setStatus('動画を読み込み中...');
-        await videoPlayerRef.current.load(processedBlob);
+        await videoPlayerRef.current.load(videoBlob);
         setStatus('動画を再生中');
         setMode('video');
         videoPlayerRef.current.play(async (imageData) => {
@@ -163,7 +177,9 @@ function App() {
             <div className="flex gap-2 items-center">
               {connected && mode !== 'idle' && (
                 <div className="text-sm text-gray-600 mr-2">
-                  FPS: <span className="font-mono font-bold">{fps}</span>
+                  FPS: <span className="font-mono font-bold">{fps}</span>{' '}
+                  Queue: <span className="font-mono font-bold">{txQueue}</span>{' '}
+                  Dropped: <span className="font-mono font-bold">{txDropped}</span>
                 </div>
               )}
               {!connected ? (
