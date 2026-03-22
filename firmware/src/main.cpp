@@ -2,7 +2,7 @@
  * HUB75 LED Panel Controller for RP2040
  * PlatformIO / Arduino (Earle Philhower core)
  *
- * Core0: USB CDC receive (Base64 encoded RGB565) + BCM conversion
+ * Core0: USB CDC receive (COBS encoded RGB565) + BCM conversion
  * Core1: HUB75 panel refresh ONLY (no other operations for flicker-free display)
  *
  * Build options (platformio.ini):
