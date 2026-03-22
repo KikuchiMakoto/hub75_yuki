@@ -4,13 +4,14 @@
 
 ## プロジェクト構成
 
-このプロジェクトは、**Application**、**Web Application**、**Firmware** の3つのコンポーネントで構成されています：
+このプロジェクトは、**Application**、**Web Application**、**Firmware**、**KiCad PCB** の4つのコンポーネントで構成されています：
 
 ```
 ├── application/        # Python制御アプリケーション (PC側)
 │   └── src/           # LED Matrix Controller (画像/動画/カメラ/テキスト表示)
 ├── web_application/   # Webアプリケーション (ブラウザ側)
 │   └── src/           # React + TypeScript (Web Serial API対応)
+├── kicad_pcb/         # KiCad設計データ (基板レイアウト/ライブラリ)
 └── firmware/          # RP2040ファームウェア (マイコン側)
     └── src/           # HUB75ドライバ (PlatformIO/Arduino)
 ```
@@ -20,6 +21,7 @@
 - **Firmware** (`firmware/`): RP2040上で動作するC++コード。HUB75パネルの駆動とUSB通信のみを担当
 - **Application** (`application/`): PC上で動作するPythonコード。画像処理、動画再生、デモ生成などを担当
 - **Web Application** (`web_application/`): ブラウザで動作するWebアプリケーション。Web Serial APIを使用してUSB経由で制御
+- **KiCad PCB** (`kicad_pcb/`): 回路図シンボル/フットプリント/基板レイアウトなどのハードウェア設計データを管理
 
 ## 特徴
 
@@ -87,6 +89,7 @@ bun run dev
 - [Application README](application/README.md)
 - [Web Application README](web_application/README.md)
 - [Firmware README](firmware/README.md)
+- [KiCad PCB データ](kicad_pcb/)
 
 ## ハードウェア要件
 
