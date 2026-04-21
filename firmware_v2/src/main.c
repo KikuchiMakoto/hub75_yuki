@@ -8,6 +8,7 @@
 #include "pico/multicore.h"
 #include "pico/platform.h"
 #include "pico/stdlib.h"
+#include "pico/critical_section.h"
 #include "pico/time.h"
 #include "hardware/clocks.h"
 #include "hardware/dma.h"
@@ -26,14 +27,6 @@
 #include "tusb.h"
 
 #include "cobs.h"
-
-#ifndef __compiler_memory_barrier
-#define __compiler_memory_barrier() __asm volatile("" ::: "memory")
-#endif
-
-#ifndef __dmb
-#define __dmb() __compiler_memory_barrier()
-#endif
 
 #define LAT_MASK  (1u << PIN_LAT)
 #define OE_MASK   (1u << PIN_OE)
@@ -59,19 +52,20 @@
 
 typedef struct {
     uint8_t data[USB_BLOCK_SIZE];
-    volatile uint16_t len;
-    volatile uint8_t ready;
+    uint16_t len;
+    uint8_t ready;
 } usb_block_t;
 
 typedef struct {
     uint8_t data[RECV_BUFFER_SIZE];
-    volatile uint16_t len;
+    uint16_t len;
     volatile uint8_t ready;
 } packet_slot_t;
 
 static PIO g_pio = pio0;
 static uint g_sm_data = 0;
 static int g_dma_chan = -1;
+static uint g_pio_prog_offset = 0;
 
 static uint8_t __attribute__((aligned(4))) g_bcm_planes[SCAN_BUFFER_COUNT][SCAN_ROWS][COLOR_DEPTH][DISPLAY_WIDTH];
 static uint32_t __attribute__((aligned(4))) g_dma_buffer[2][DISPLAY_WIDTH];
@@ -82,8 +76,9 @@ static uint8_t g_usb_cons_idx = 0;
 static uint16_t g_usb_cons_pos = 0;
 
 static packet_slot_t g_packet_slots[PACKET_QUEUE_COUNT];
+static uint16_t g_packet_slot_checksum[PACKET_QUEUE_COUNT];
 static uint8_t g_pkt_prod_idx = 0;
-static volatile uint8_t g_pkt_cons_idx = 0;
+static uint8_t g_pkt_cons_idx = 0;
 static uint16_t g_parser_pos = 0;
 static bool g_parser_discard = false;
 static bool g_usb_resync = false;
@@ -95,32 +90,41 @@ static uint8_t g_r5_to_cd[32];
 static uint8_t g_g6_to_cd[64];
 static uint8_t g_b5_to_cd[32];
 
-static volatile uint8_t g_display_idx = 0;
-static volatile uint8_t g_pending_idx = 0;
-static volatile bool g_swap_pending = false;
+static uint8_t g_display_idx = 0;
+static uint8_t g_pending_idx = 0;
+static bool g_swap_pending = false;
 static volatile bool g_dma_done = false;
 static volatile uint32_t g_dma_wait_timeouts = 0;
 static uint64_t g_next_swap_allowed_us = 0;
 
-static volatile uint32_t g_rx_total_bytes = 0;
+static uint32_t g_rx_total_bytes = 0;
 static volatile uint32_t g_decoded_frames = 0;
 static volatile uint32_t g_displayed_frames = 0;
 static volatile uint32_t g_scan_frames = 0;
-static volatile uint32_t g_dropped_frames_core0 = 0;
+static uint32_t g_dropped_frames_core0 = 0;
 static volatile uint32_t g_dropped_frames_core1 = 0;
 static volatile uint32_t g_cobs_errors_core1 = 0;
 
-static volatile uint32_t g_usb_drop_bytes = 0;
-static volatile uint32_t g_drop_swap_pending = 0;
-static volatile uint32_t g_drop_packet_overflow = 0;
-static volatile uint32_t g_drop_packet_q_overrun = 0;
+static uint32_t g_usb_drop_bytes = 0;
+static volatile uint32_t g_swap_replaced_frames = 0;
+static uint32_t g_drop_packet_overflow = 0;
+static uint32_t g_drop_packet_q_overrun = 0;
+static uint32_t g_queue_full_on_delim = 0;
+static uint32_t g_queue_full_mid_packet = 0;
+static uint32_t g_usb_block_ready_overrun = 0;
+static volatile uint32_t g_slot_corruption_events = 0;
+static volatile uint32_t g_ready_len_zero_events = 0;
+static volatile uint32_t g_core1_packet_gap_us_max = 0;
+static uint32_t g_core1_last_packet_us = 0;
 
-static volatile uint32_t g_tud_gap_us_max = 0;
+static uint32_t g_tud_gap_us_max = 0;
 static volatile uint32_t g_decode_us_max = 0;
 static volatile uint32_t g_convert_us_max = 0;
-static volatile uint32_t g_usb_block_highwater = 0;
-static volatile uint32_t g_packet_queue_highwater = 0;
+static uint32_t g_usb_block_highwater = 0;
+static uint32_t g_packet_queue_highwater = 0;
 static uint32_t g_last_tud_us = 0;
+
+static critical_section_t g_stats_lock;
 
 static uint32_t g_stats_last_rx = 0;
 static uint32_t g_stats_last_dec = 0;
@@ -134,15 +138,63 @@ static uint64_t g_stats_last_us = 0;
 _Static_assert(MAX_FRAME_UPDATE_FPS > 0, "MAX_FRAME_UPDATE_FPS must be > 0");
 _Static_assert(USB_BLOCK_COUNT == 2u, "USB_BLOCK_COUNT must be 2 for SPSC");
 _Static_assert(RECV_BUFFER_SIZE <= 65535u, "RECV_BUFFER_SIZE must fit packet slot length");
+_Static_assert(COLOR_DEPTH == 6u, "COLOR_DEPTH must be 6 for current BCM conversion layout");
+_Static_assert(COLOR_DEPTH >= 1u && COLOR_DEPTH <= 8u, "COLOR_DEPTH must be in range [1, 8]");
 
 static inline uint32_t min_u32(uint32_t a, uint32_t b) {
     return (a < b) ? a : b;
 }
 
-static inline void update_max_u32(volatile uint32_t *current_max, uint32_t value) {
+static inline uint16_t xor16_checksum(const uint8_t *data, uint16_t len) {
+    uint16_t acc = 0;
+    for (uint16_t i = 0; i < len; ++i) {
+        uint16_t shifted = (uint16_t)data[i] << ((i & 1u) ? 8u : 0u);
+        acc ^= shifted;
+    }
+    return acc;
+}
+
+static inline void update_max_u32(uint32_t *current_max, uint32_t value) {
     if (value > *current_max) {
         *current_max = value;
     }
+}
+
+static inline void update_max_atomic_u32(volatile uint32_t *current_max, uint32_t value) {
+    critical_section_enter_blocking(&g_stats_lock);
+    if (value > *current_max) {
+        *current_max = value;
+    }
+    critical_section_exit(&g_stats_lock);
+}
+
+static inline uint32_t load_atomic_u32(volatile uint32_t *value) {
+    critical_section_enter_blocking(&g_stats_lock);
+    uint32_t out = *value;
+    critical_section_exit(&g_stats_lock);
+    return out;
+}
+
+static inline uint32_t exchange_atomic_u32(volatile uint32_t *value, uint32_t next) {
+    critical_section_enter_blocking(&g_stats_lock);
+    uint32_t old = *value;
+    *value = next;
+    critical_section_exit(&g_stats_lock);
+    return old;
+}
+
+static inline void add_atomic_u32(volatile uint32_t *value, uint32_t delta) {
+    critical_section_enter_blocking(&g_stats_lock);
+    *value += delta;
+    critical_section_exit(&g_stats_lock);
+}
+
+static inline bool packet_slot_ready(packet_slot_t *slot) {
+    if (!slot->ready) {
+        return false;
+    }
+    __dmb();
+    return true;
 }
 
 static uint32_t usb_pending_bytes(void) {
@@ -169,7 +221,7 @@ static uint32_t usb_pending_bytes(void) {
 static uint32_t packet_queue_depth(void) {
     uint32_t depth = 0;
     for (uint32_t i = 0; i < PACKET_QUEUE_COUNT; ++i) {
-        if (g_packet_slots[i].ready) {
+        if (packet_slot_ready(&g_packet_slots[i])) {
             depth++;
         }
     }
@@ -205,7 +257,6 @@ static inline void usb_publish_block(usb_block_t *blk) {
         return;
     }
 
-    __dmb();
     blk->ready = 1u;
     update_max_u32(&g_usb_block_highwater, usb_pending_bytes());
 
@@ -223,7 +274,7 @@ static inline void packet_publish_slot(packet_slot_t *slot) {
 
     uint8_t next = (uint8_t)((g_pkt_prod_idx + 1u) % PACKET_QUEUE_COUNT);
     g_pkt_prod_idx = next;
-    if (!g_packet_slots[next].ready) {
+    if (!packet_slot_ready(&g_packet_slots[next])) {
         g_packet_slots[next].len = 0;
     }
 }
@@ -241,13 +292,8 @@ static bool stream_pop_usb_byte(uint8_t *out) {
         return false;
     }
 
-    if (g_usb_cons_pos == 0) {
-        __dmb();
-    }
-
     if (g_usb_cons_pos >= blk->len) {
         blk->len = 0;
-        __dmb();
         blk->ready = 0u;
         g_usb_cons_pos = 0;
         g_usb_cons_idx ^= 1u;
@@ -255,14 +301,12 @@ static bool stream_pop_usb_byte(uint8_t *out) {
         if (!blk->ready) {
             return false;
         }
-        __dmb();
     }
 
     *out = blk->data[g_usb_cons_pos++];
 
     if (g_usb_cons_pos >= blk->len) {
         blk->len = 0;
-        __dmb();
         blk->ready = 0u;
         g_usb_cons_pos = 0;
         g_usb_cons_idx ^= 1u;
@@ -337,7 +381,7 @@ void __not_in_flash_func(prepare_dma_buffer)(uint8_t plane_idx, uint32_t buf_idx
     uint32_t *dst = g_dma_buffer[buf_idx];
 
     for (uint32_t x = 0; x < DISPLAY_WIDTH; ++x) {
-        dst[x] = src[DISPLAY_WIDTH - 1u - x];
+        dst[x] = src[x];
     }
 }
 
@@ -351,8 +395,8 @@ static void hub75_gpio_init(void) {
 }
 
 static void hub75_pio_init(void) {
-    uint offset = pio_add_program(g_pio, &hub75_data_program);
-    pio_sm_config c = hub75_data_program_get_default_config(offset);
+    g_pio_prog_offset = pio_add_program(g_pio, &hub75_data_program);
+    pio_sm_config c = hub75_data_program_get_default_config(g_pio_prog_offset);
 
     pio_sm_set_consecutive_pindirs(g_pio, g_sm_data, PIN_R0, 6, true);
     for (uint32_t pin = PIN_R0; pin < (PIN_R0 + 6u); ++pin) {
@@ -368,7 +412,7 @@ static void hub75_pio_init(void) {
     sm_config_set_fifo_join(&c, PIO_FIFO_JOIN_TX);
     sm_config_set_clkdiv(&c, 1.0f);
 
-    pio_sm_init(g_pio, g_sm_data, offset, &c);
+    pio_sm_init(g_pio, g_sm_data, g_pio_prog_offset, &c);
     pio_sm_set_enabled(g_pio, g_sm_data, true);
 }
 
@@ -392,6 +436,36 @@ void __not_in_flash_func(dma_irq0_handler)(void) {
         dma_hw->ints0 = mask;
         g_dma_done = true;
     }
+}
+
+static bool __not_in_flash_func(wait_for_row_shift_complete)(void) {
+    uint32_t wait_start = time_us_32();
+    uint target_pc = g_pio_prog_offset + hub75_data_wrap_target;
+
+    while (true) {
+        if (pio_sm_is_tx_fifo_empty(g_pio, g_sm_data) && pio_sm_get_pc(g_pio, g_sm_data) == target_pc) {
+            return true;
+        }
+
+        if ((uint32_t)(time_us_32() - wait_start) > DMA_WAIT_TIMEOUT_US) {
+            return false;
+        }
+
+        tight_loop_contents();
+    }
+}
+
+static void __not_in_flash_func(recover_scan_pipeline)(void) {
+    uint chan = (uint)g_dma_chan;
+    uint32_t mask = 1u << (uint32_t)g_dma_chan;
+
+    dma_channel_abort(chan);
+    dma_hw->ints0 = mask;
+    pio_sm_set_enabled(g_pio, g_sm_data, false);
+    pio_sm_clear_fifos(g_pio, g_sm_data);
+    pio_sm_restart(g_pio, g_sm_data);
+    pio_sm_set_enabled(g_pio, g_sm_data, true);
+    g_dma_done = true;
 }
 
 void __not_in_flash_func(hub75_refresh_once)(void) {
@@ -421,23 +495,26 @@ void __not_in_flash_func(hub75_refresh_once)(void) {
             }
 
             uint32_t wait_start = time_us_32();
+            bool row_transfer_ok = true;
             while (!g_dma_done) {
                 __wfe();
                 if ((uint32_t)(time_us_32() - wait_start) > DMA_WAIT_TIMEOUT_US) {
                     if (!dma_channel_is_busy((uint)g_dma_chan)) {
                         g_dma_done = true;
                     } else {
-                        g_dma_wait_timeouts++;
-                        dma_channel_abort((uint)g_dma_chan);
-                        dma_hw->ints0 = 1u << (uint32_t)g_dma_chan;
-                        g_dma_done = true;
+                        row_transfer_ok = false;
+                        break;
                     }
                 }
             }
 
-            while (!pio_sm_is_tx_fifo_empty(g_pio, g_sm_data)) {
-                tight_loop_contents();
+            if (!row_transfer_ok || !wait_for_row_shift_complete()) {
+                add_atomic_u32(&g_dma_wait_timeouts, 1u);
+                recover_scan_pipeline();
+                buf_idx = next_buf;
+                continue;
             }
+
             __asm volatile("nop\nnop\nnop\nnop");
 
             set_row_address(row);
@@ -453,15 +530,14 @@ void __not_in_flash_func(hub75_refresh_once)(void) {
         }
     }
 
-    g_scan_frames++;
+    add_atomic_u32(&g_scan_frames, 1u);
 
     if (g_swap_pending) {
         uint64_t now = time_us_64();
         if (now >= g_next_swap_allowed_us) {
-            __dmb();
             g_display_idx = g_pending_idx;
             g_swap_pending = false;
-            g_displayed_frames++;
+            add_atomic_u32(&g_displayed_frames, 1u);
             g_next_swap_allowed_us = now + FRAME_UPDATE_PERIOD_US;
         }
     }
@@ -483,6 +559,7 @@ void __not_in_flash_func(convert_rgb565_to_bcm)(const uint8_t *src, uint8_t plan
         uint8_t *plane5 = g_bcm_planes[plane_idx][row][5];
 
         for (uint32_t x = 0; x < DISPLAY_WIDTH; ++x) {
+            uint32_t dst_x = DISPLAY_WIDTH - 1u - x;
             uint16_t p_up = (uint16_t)up[0] | ((uint16_t)up[1] << 8u);
             uint16_t p_lo = (uint16_t)lo[0] | ((uint16_t)lo[1] << 8u);
             up += 2;
@@ -495,47 +572,47 @@ void __not_in_flash_func(convert_rgb565_to_bcm)(const uint8_t *src, uint8_t plan
             uint8_t g1 = g_g6_to_cd[(p_lo >> 5u) & 0x3Fu];
             uint8_t b1 = g_b5_to_cd[p_lo & 0x1Fu];
 
-            plane0[x] = (uint8_t)(((r0 >> 0u) & 1u) |
-                                  (((g0 >> 0u) & 1u) << 1u) |
-                                  (((b0 >> 0u) & 1u) << 2u) |
-                                  (((r1 >> 0u) & 1u) << 3u) |
-                                  (((g1 >> 0u) & 1u) << 4u) |
-                                  (((b1 >> 0u) & 1u) << 5u));
+            plane0[dst_x] = (uint8_t)(((r0 >> 0u) & 1u) |
+                                      (((g0 >> 0u) & 1u) << 1u) |
+                                      (((b0 >> 0u) & 1u) << 2u) |
+                                      (((r1 >> 0u) & 1u) << 3u) |
+                                      (((g1 >> 0u) & 1u) << 4u) |
+                                      (((b1 >> 0u) & 1u) << 5u));
 
-            plane1[x] = (uint8_t)(((r0 >> 1u) & 1u) |
-                                  (((g0 >> 1u) & 1u) << 1u) |
-                                  (((b0 >> 1u) & 1u) << 2u) |
-                                  (((r1 >> 1u) & 1u) << 3u) |
-                                  (((g1 >> 1u) & 1u) << 4u) |
-                                  (((b1 >> 1u) & 1u) << 5u));
+            plane1[dst_x] = (uint8_t)(((r0 >> 1u) & 1u) |
+                                      (((g0 >> 1u) & 1u) << 1u) |
+                                      (((b0 >> 1u) & 1u) << 2u) |
+                                      (((r1 >> 1u) & 1u) << 3u) |
+                                      (((g1 >> 1u) & 1u) << 4u) |
+                                      (((b1 >> 1u) & 1u) << 5u));
 
-            plane2[x] = (uint8_t)(((r0 >> 2u) & 1u) |
-                                  (((g0 >> 2u) & 1u) << 1u) |
-                                  (((b0 >> 2u) & 1u) << 2u) |
-                                  (((r1 >> 2u) & 1u) << 3u) |
-                                  (((g1 >> 2u) & 1u) << 4u) |
-                                  (((b1 >> 2u) & 1u) << 5u));
+            plane2[dst_x] = (uint8_t)(((r0 >> 2u) & 1u) |
+                                      (((g0 >> 2u) & 1u) << 1u) |
+                                      (((b0 >> 2u) & 1u) << 2u) |
+                                      (((r1 >> 2u) & 1u) << 3u) |
+                                      (((g1 >> 2u) & 1u) << 4u) |
+                                      (((b1 >> 2u) & 1u) << 5u));
 
-            plane3[x] = (uint8_t)(((r0 >> 3u) & 1u) |
-                                  (((g0 >> 3u) & 1u) << 1u) |
-                                  (((b0 >> 3u) & 1u) << 2u) |
-                                  (((r1 >> 3u) & 1u) << 3u) |
-                                  (((g1 >> 3u) & 1u) << 4u) |
-                                  (((b1 >> 3u) & 1u) << 5u));
+            plane3[dst_x] = (uint8_t)(((r0 >> 3u) & 1u) |
+                                      (((g0 >> 3u) & 1u) << 1u) |
+                                      (((b0 >> 3u) & 1u) << 2u) |
+                                      (((r1 >> 3u) & 1u) << 3u) |
+                                      (((g1 >> 3u) & 1u) << 4u) |
+                                      (((b1 >> 3u) & 1u) << 5u));
 
-            plane4[x] = (uint8_t)(((r0 >> 4u) & 1u) |
-                                  (((g0 >> 4u) & 1u) << 1u) |
-                                  (((b0 >> 4u) & 1u) << 2u) |
-                                  (((r1 >> 4u) & 1u) << 3u) |
-                                  (((g1 >> 4u) & 1u) << 4u) |
-                                  (((b1 >> 4u) & 1u) << 5u));
+            plane4[dst_x] = (uint8_t)(((r0 >> 4u) & 1u) |
+                                      (((g0 >> 4u) & 1u) << 1u) |
+                                      (((b0 >> 4u) & 1u) << 2u) |
+                                      (((r1 >> 4u) & 1u) << 3u) |
+                                      (((g1 >> 4u) & 1u) << 4u) |
+                                      (((b1 >> 4u) & 1u) << 5u));
 
-            plane5[x] = (uint8_t)(((r0 >> 5u) & 1u) |
-                                  (((g0 >> 5u) & 1u) << 1u) |
-                                  (((b0 >> 5u) & 1u) << 2u) |
-                                  (((r1 >> 5u) & 1u) << 3u) |
-                                  (((g1 >> 5u) & 1u) << 4u) |
-                                  (((b1 >> 5u) & 1u) << 5u));
+            plane5[dst_x] = (uint8_t)(((r0 >> 5u) & 1u) |
+                                      (((g0 >> 5u) & 1u) << 1u) |
+                                      (((b0 >> 5u) & 1u) << 2u) |
+                                      (((r1 >> 5u) & 1u) << 3u) |
+                                      (((g1 >> 5u) & 1u) << 4u) |
+                                      (((b1 >> 5u) & 1u) << 5u));
         }
     }
 }
@@ -543,7 +620,6 @@ void __not_in_flash_func(convert_rgb565_to_bcm)(const uint8_t *src, uint8_t plan
 static uint8_t select_build_buffer(void) {
     bool used[SCAN_BUFFER_COUNT] = {false, false, false};
 
-    __dmb();
     used[g_display_idx] = true;
     if (g_swap_pending) {
         used[g_pending_idx] = true;
@@ -560,51 +636,63 @@ static uint8_t select_build_buffer(void) {
 
 static void core1_process_one_packet(void) {
     packet_slot_t *slot = &g_packet_slots[g_pkt_cons_idx];
-    if (!slot->ready) {
+    if (!packet_slot_ready(slot)) {
         return;
     }
 
-    __dmb();
+    uint32_t packet_start_us = time_us_32();
+    if (g_core1_last_packet_us != 0u) {
+        update_max_atomic_u32(&g_core1_packet_gap_us_max, packet_start_us - g_core1_last_packet_us);
+    }
+    g_core1_last_packet_us = packet_start_us;
+
     uint16_t encoded_len = slot->len;
 
+    if (encoded_len == 0u) {
+        add_atomic_u32(&g_ready_len_zero_events, 1u);
+    }
+
     if (encoded_len == 0 || encoded_len > RECV_BUFFER_SIZE) {
-        g_dropped_frames_core1++;
-        g_cobs_errors_core1++;
+        add_atomic_u32(&g_dropped_frames_core1, 1u);
+        add_atomic_u32(&g_cobs_errors_core1, 1u);
         packet_release_slot(slot);
         g_pkt_cons_idx = (uint8_t)((g_pkt_cons_idx + 1u) % PACKET_QUEUE_COUNT);
         return;
     }
 
+    uint16_t expected_checksum = g_packet_slot_checksum[g_pkt_cons_idx];
+    uint16_t actual_checksum = xor16_checksum(slot->data, encoded_len);
+    if (expected_checksum != actual_checksum) {
+        add_atomic_u32(&g_slot_corruption_events, 1u);
+    }
+
     uint32_t t_decode = time_us_32();
     size_t decoded_len = cobs_decode(slot->data, encoded_len, g_decode_buf, FRAME_SIZE_RGB565);
     uint32_t decode_us = (uint32_t)(time_us_32() - t_decode);
-    update_max_u32(&g_decode_us_max, decode_us);
+    update_max_atomic_u32(&g_decode_us_max, decode_us);
 
     packet_release_slot(slot);
     g_pkt_cons_idx = (uint8_t)((g_pkt_cons_idx + 1u) % PACKET_QUEUE_COUNT);
 
     if (decoded_len != FRAME_SIZE_RGB565) {
-        g_dropped_frames_core1++;
-        g_cobs_errors_core1++;
+        add_atomic_u32(&g_dropped_frames_core1, 1u);
+        add_atomic_u32(&g_cobs_errors_core1, 1u);
         return;
     }
 
     if (g_swap_pending) {
-        g_dropped_frames_core1++;
-        g_drop_swap_pending++;
-        return;
+        add_atomic_u32(&g_swap_replaced_frames, 1u);
     }
 
     uint8_t build_idx = select_build_buffer();
     uint32_t t_convert = time_us_32();
     convert_rgb565_to_bcm(g_decode_buf, build_idx);
     uint32_t convert_us = (uint32_t)(time_us_32() - t_convert);
-    update_max_u32(&g_convert_us_max, convert_us);
+    update_max_atomic_u32(&g_convert_us_max, convert_us);
 
-    __dmb();
     g_pending_idx = build_idx;
     g_swap_pending = true;
-    g_decoded_frames++;
+    add_atomic_u32(&g_decoded_frames, 1u);
 }
 
 static void ingest_usb_blocks(void) {
@@ -631,6 +719,7 @@ static void ingest_usb_blocks(void) {
 
         usb_block_t *blk = &g_usb_blocks[g_usb_prod_idx];
         if (blk->ready) {
+            g_usb_block_ready_overrun++;
             uint32_t req = min_u32(avail, (uint32_t)sizeof(trash));
             uint32_t n = tud_cdc_read(trash, req);
             if (n == 0) {
@@ -693,11 +782,13 @@ static void parse_usb_stream_to_packets(void) {
         if (b == 0x00u) {
             if (!g_parser_discard && g_parser_pos > 0) {
                 packet_slot_t *slot = &g_packet_slots[g_pkt_prod_idx];
-                if (slot->ready) {
+                if (packet_slot_ready(slot)) {
                     g_dropped_frames_core0++;
                     g_drop_packet_q_overrun++;
+                    g_queue_full_on_delim++;
                 } else {
                     slot->len = g_parser_pos;
+                    g_packet_slot_checksum[g_pkt_prod_idx] = xor16_checksum(slot->data, slot->len);
                     packet_publish_slot(slot);
                 }
             }
@@ -712,11 +803,12 @@ static void parse_usb_stream_to_packets(void) {
         }
 
         packet_slot_t *slot = &g_packet_slots[g_pkt_prod_idx];
-        if (slot->ready) {
+        if (packet_slot_ready(slot)) {
             g_parser_discard = true;
             g_parser_pos = 0;
             g_dropped_frames_core0++;
             g_drop_packet_q_overrun++;
+            g_queue_full_mid_packet++;
             continue;
         }
 
@@ -739,13 +831,19 @@ static void emit_stats(void) {
     g_stats_last_us = now;
 
     uint32_t rx = g_rx_total_bytes;
-    uint32_t dec = g_decoded_frames;
-    uint32_t disp = g_displayed_frames;
-    uint32_t scan = g_scan_frames;
-    uint32_t drop = g_dropped_frames_core0 + g_dropped_frames_core1;
-    uint32_t cobs = g_cobs_errors_core1;
+    uint32_t dec = load_atomic_u32(&g_decoded_frames);
+    uint32_t disp = load_atomic_u32(&g_displayed_frames);
+    uint32_t scan = load_atomic_u32(&g_scan_frames);
+    uint32_t drop = g_dropped_frames_core0 + load_atomic_u32(&g_dropped_frames_core1);
+    uint32_t cobs = load_atomic_u32(&g_cobs_errors_core1);
     uint32_t usb_drop = g_usb_drop_bytes;
-    uint32_t dma_to = g_dma_wait_timeouts;
+    uint32_t dma_to = load_atomic_u32(&g_dma_wait_timeouts);
+    uint32_t swap_replaced = load_atomic_u32(&g_swap_replaced_frames);
+    uint32_t qfull_delim = g_queue_full_on_delim;
+    uint32_t qfull_mid = g_queue_full_mid_packet;
+    uint32_t usb_blk_ovr = g_usb_block_ready_overrun;
+    uint32_t slot_corrupt = load_atomic_u32(&g_slot_corruption_events);
+    uint32_t ready_len0 = load_atomic_u32(&g_ready_len_zero_events);
 
     uint32_t rx_bps = rx - g_stats_last_rx;
     uint32_t usb_drop_bps = usb_drop - g_stats_last_usb_drop;
@@ -756,8 +854,9 @@ static void emit_stats(void) {
     uint32_t dma_to_ps = dma_to - g_stats_last_dma_to;
 
     uint32_t tud_gap_us_max = g_tud_gap_us_max;
-    uint32_t decode_us_max = g_decode_us_max;
-    uint32_t convert_us_max = g_convert_us_max;
+    uint32_t decode_us_max = exchange_atomic_u32(&g_decode_us_max, 0u);
+    uint32_t convert_us_max = exchange_atomic_u32(&g_convert_us_max, 0u);
+    uint32_t pkt_gap_us_max = exchange_atomic_u32(&g_core1_packet_gap_us_max, 0u);
     uint32_t usb_hw = g_usb_block_highwater;
     uint32_t pkt_hw = g_packet_queue_highwater;
 
@@ -770,15 +869,13 @@ static void emit_stats(void) {
     g_stats_last_dma_to = dma_to;
 
     g_tud_gap_us_max = 0;
-    g_decode_us_max = 0;
-    g_convert_us_max = 0;
     g_usb_block_highwater = usb_pending_bytes();
     g_packet_queue_highwater = packet_queue_depth();
 
     if (tud_cdc_n_connected(0) && tud_cdc_n_write_available(0) > 320) {
-        char line[384];
+        char line[512];
         int n = snprintf(line, sizeof(line),
-                         "STAT clk_khz=%lu rx_Bps=%lu usb_drop_Bps=%lu dec_fps=%lu disp_fps=%lu scan_fps=%lu drop_ps=%lu drop=%lu swap_drop=%lu ovf_drop=%lu qovf_drop=%lu cobs=%lu usb_hw=%lu pkt_hw=%lu tud_gap_us=%lu dec_us=%lu conv_us=%lu dma_to_ps=%lu dma_to=%lu\r\n",
+                         "STAT clk_khz=%lu rx_Bps=%lu usb_drop_Bps=%lu dec_fps=%lu disp_fps=%lu scan_fps=%lu drop_ps=%lu drop=%lu swap_replace=%lu ovf_drop=%lu qovf_drop=%lu qfull_delim=%lu qfull_mid=%lu usb_blk_ovr=%lu slot_corrupt=%lu ready_len0=%lu cobs=%lu usb_hw=%lu pkt_hw=%lu tud_gap_us=%lu dec_us=%lu conv_us=%lu pkt_gap_us=%lu dma_to_ps=%lu dma_to=%lu\r\n",
                          (unsigned long)(clock_get_hz(clk_sys) / 1000u),
                          (unsigned long)rx_bps,
                          (unsigned long)usb_drop_bps,
@@ -787,15 +884,21 @@ static void emit_stats(void) {
                          (unsigned long)scan_fps,
                          (unsigned long)drop_ps,
                          (unsigned long)drop,
-                         (unsigned long)g_drop_swap_pending,
+                         (unsigned long)swap_replaced,
                          (unsigned long)g_drop_packet_overflow,
                          (unsigned long)g_drop_packet_q_overrun,
+                         (unsigned long)qfull_delim,
+                         (unsigned long)qfull_mid,
+                         (unsigned long)usb_blk_ovr,
+                         (unsigned long)slot_corrupt,
+                         (unsigned long)ready_len0,
                          (unsigned long)cobs,
                          (unsigned long)usb_hw,
                          (unsigned long)pkt_hw,
                          (unsigned long)tud_gap_us_max,
                          (unsigned long)decode_us_max,
                          (unsigned long)convert_us_max,
+                         (unsigned long)pkt_gap_us_max,
                          (unsigned long)dma_to_ps,
                          (unsigned long)dma_to);
         if (n > 0) {
@@ -841,6 +944,8 @@ int main(void) {
     memset(g_usb_blocks, 0, sizeof(g_usb_blocks));
     memset(g_packet_slots, 0, sizeof(g_packet_slots));
     memset(g_decode_buf, 0, sizeof(g_decode_buf));
+
+    critical_section_init(&g_stats_lock);
 
     init_gamma_and_color_luts();
 

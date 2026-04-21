@@ -11,10 +11,10 @@
 
 - Core0: TinyUSB task service, CDC bulk reads, stream parser, packet-queue publish only
 - Core1: HUB75 refresh + COBS decode + RGB565->BCM conversion (heavy path moved to Core1)
-- Frame swap: triple BCM buffer handoff with lockless pending/display index update
+- Frame swap: triple BCM buffer handoff with latest-wins pending update (new frame can replace older pending frame)
 - Frame update limiter: panel content swap is capped to about `180 fps` (`MAX_FRAME_UPDATE_FPS`) to avoid over-fast catch-up when packets backlog
 - USB ingest path uses Core0 double-buffer blocks (SPSC) to avoid ring write blocking
-- Runtime counters include bottleneck diagnostics: `rx_Bps`, `usb_drop_Bps`, `dec_fps`, `disp_fps`, `scan_fps`, `drop_ps`, `swap_drop`, `ovf_drop`, `qovf_drop`, `usb_hw`, `pkt_hw`, `tud_gap_us`, `dec_us`, `conv_us`, `dma_to`
+- Runtime counters include bottleneck diagnostics: `rx_Bps`, `usb_drop_Bps`, `dec_fps`, `disp_fps`, `scan_fps`, `drop_ps`, `swap_replace`, `ovf_drop`, `qovf_drop`, `usb_hw`, `pkt_hw`, `tud_gap_us`, `dec_us`, `conv_us`, `dma_to`
 
 Current implementation targets `128x32` default operation and keeps HUB75 scan on `pio0/sm0` + single display DMA channel.
 
@@ -45,6 +45,13 @@ pio run -e pico_picosdk
 pio run -t upload -e pico_picosdk
 ```
 
+Validation-oriented profiles:
+
+```powershell
+pio run -e pico_picosdk_debugsafe
+pio run -e pico_picosdk_fastcheck
+```
+
 Notes for PlatformIO build:
 
 - Uses `framework = picosdk` from `https://github.com/maxgerhardt/platform-raspberrypi.git`.
@@ -53,6 +60,8 @@ Notes for PlatformIO build:
 - `CFG_TUSB_CONFIG_FILE` is set to `tusb_config.h` so CDC buffer settings remain project-controlled.
 - Build flags are speed-oriented (`-Ofast`, frame-pointer/unwind disabled) and `PIO_STDIO_NONE` is used to disable unused stdio backends.
 - TinyUSB build is reduced to CDC-device-only source set (host and other classes are excluded).
+- `pico_picosdk_debugsafe` enables stronger warnings and debug-oriented checks (`-O2`, `-g3`, stack protector, warning set).
+- `pico_picosdk_fastcheck` keeps fast optimization while adding extra warning checks for overflow/bounds-risk patterns.
 
 ## Repository Hygiene
 
@@ -79,7 +88,7 @@ python firmware_v2/tools/bench_stream.py --port COM5 --fps 145 --duration 30 --c
 Example output line:
 
 ```text
-HOST tx_Bps=1184200 send_fps=144 send_err=0 | STAT clk_khz=200000 rx_Bps=1179000 usb_drop_Bps=0 dec_fps=141 disp_fps=140 scan_fps=140 drop_ps=0 drop=0 swap_drop=0 ovf_drop=0 qovf_drop=0 cobs=0 usb_hw=2048 pkt_hw=2 tud_gap_us=180 dec_us=220 conv_us=1420 dma_to_ps=0 dma_to=0
+HOST tx_Bps=1184200 send_fps=144 send_err=0 | STAT clk_khz=200000 rx_Bps=1179000 usb_drop_Bps=0 dec_fps=141 disp_fps=140 scan_fps=140 drop_ps=0 drop=0 swap_replace=0 ovf_drop=0 qovf_drop=0 cobs=0 usb_hw=2048 pkt_hw=2 tud_gap_us=180 dec_us=220 conv_us=1420 dma_to_ps=0 dma_to=0
 ```
 
 This gives host transmit rate and firmware-side decode/display rates independently.
