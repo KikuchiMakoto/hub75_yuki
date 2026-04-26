@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { SerialDevice } from './lib/serial';
 import { loadImage, VideoPlayer } from './lib/media';
 import { VideoProcessor } from './lib/videoProcessor';
@@ -9,19 +9,45 @@ import type { DemoType } from './types';
 
 type Mode = 'idle' | 'image' | 'video' | 'demo';
 
+// Target FPS for demos (same baseline as Python controller)
+const DEMO_TARGET_FPS = 30;
+
 function App() {
   const [connected, setConnected] = useState(false);
   const [mode, setMode] = useState<Mode>('idle');
   const [status, setStatus] = useState('');
   const [fps, setFps] = useState(0);
-  const [txQueue, setTxQueue] = useState(0);
   const [txDropped, setTxDropped] = useState(0);
+  const [txErrors, setTxErrors] = useState(0);
 
   const serialRef = useRef<SerialDevice>(new SerialDevice());
   const videoPlayerRef = useRef<VideoPlayer>(new VideoPlayer());
   const videoProcessorRef = useRef<VideoProcessor>(new VideoProcessor());
   const demoAnimationRef = useRef<number | null>(null);
   const fpsCounterRef = useRef({ count: 0, lastTime: Date.now() });
+  const metricsTimerRef = useRef<number | null>(null);
+  const modeRef = useRef<Mode>('idle');
+
+  // Keep modeRef in sync with state so callbacks never read stale mode
+  useEffect(() => {
+    modeRef.current = mode;
+  }, [mode]);
+
+  // Poll transport metrics every 500 ms so the UI stays responsive
+  useEffect(() => {
+    if (!connected) return;
+    metricsTimerRef.current = window.setInterval(() => {
+      const m = serialRef.current.getMetrics();
+      setTxDropped(m.dropped);
+      setTxErrors(m.errors);
+    }, 500);
+    return () => {
+      if (metricsTimerRef.current !== null) {
+        clearInterval(metricsTimerRef.current);
+        metricsTimerRef.current = null;
+      }
+    };
+  }, [connected]);
 
   useEffect(() => {
     return () => {
@@ -32,22 +58,19 @@ function App() {
     };
   }, []);
 
-  const stopCurrentMode = () => {
-    if (mode === 'video') {
+  const stopCurrentMode = useCallback(() => {
+    const currentMode = modeRef.current;
+    if (currentMode === 'video') {
       videoPlayerRef.current.stop();
-    } else if (mode === 'demo' && demoAnimationRef.current !== null) {
+    } else if (currentMode === 'demo' && demoAnimationRef.current !== null) {
       cancelAnimationFrame(demoAnimationRef.current);
       demoAnimationRef.current = null;
     }
     setMode('idle');
-  };
+  }, []);
 
-  const updateFps = () => {
+  const updateFps = useCallback(() => {
     fpsCounterRef.current.count++;
-    const metrics = serialRef.current.getQueueMetrics();
-    setTxQueue(metrics.queued);
-    setTxDropped(metrics.dropped);
-
     const now = Date.now();
     const elapsed = now - fpsCounterRef.current.lastTime;
     if (elapsed >= 1000) {
@@ -55,11 +78,12 @@ function App() {
       fpsCounterRef.current.count = 0;
       fpsCounterRef.current.lastTime = now;
     }
-  };
+  }, []);
 
   const handleConnect = async () => {
     try {
       await serialRef.current.connect();
+      serialRef.current.resetMetrics();
       setConnected(true);
       setStatus('接続成功');
     } catch (error) {
@@ -74,8 +98,8 @@ function App() {
     setConnected(false);
     setStatus('切断しました');
     setFps(0);
-    setTxQueue(0);
     setTxDropped(0);
+    setTxErrors(0);
   };
 
   const handleFileDrop = async (file: File) => {
@@ -92,7 +116,8 @@ function App() {
         const imageData = await loadImage(file);
         setStatus('画像を表示中');
         setMode('image');
-        await serialRef.current.sendFrame(imageData);
+        const ok = await serialRef.current.sendFrame(imageData);
+        if (!ok) setStatus('送信に失敗しました');
         updateFps();
       } catch (error) {
         setStatus(`画像の読み込みに失敗: ${error}`);
@@ -108,19 +133,27 @@ function App() {
         if (needsResize) {
           setStatus('FFmpegを読み込み中...');
           await videoProcessorRef.current.load();
-          setStatus(`動画をリサイズ中... (${metadata.width}x${metadata.height} → 128x32)`);
+          setStatus(
+            `動画をリサイズ中... (${metadata.width}x${metadata.height} → 128x32)`
+          );
           videoBlob = await videoProcessorRef.current.resizeVideo(file);
         } else {
-          setStatus(`動画を再エンコードせず再生します (${metadata.width}x${metadata.height})`);
+          setStatus(
+            `動画を再エンコードせず再生します (${metadata.width}x${metadata.height})`
+          );
         }
 
         setStatus('動画を読み込み中...');
         await videoPlayerRef.current.load(videoBlob);
         setStatus('動画を再生中');
         setMode('video');
-        videoPlayerRef.current.play(async (imageData) => {
-          await serialRef.current.sendFrame(imageData);
-          updateFps();
+        videoPlayerRef.current.play((imageData) => {
+          serialRef.current
+            .sendFrame(imageData)
+            .then((ok) => {
+              if (ok) updateFps();
+            })
+            .catch((err) => console.error('Video frame send error:', err));
         });
       } catch (error) {
         setStatus(`動画の読み込みに失敗: ${error}`);
@@ -138,16 +171,30 @@ function App() {
     setStatus(`デモを実行中: ${demo}`);
     setMode('demo');
 
-    let startTime = Date.now();
-    const runDemo = async () => {
-      const t = (Date.now() - startTime) / 1000;
-      const imageData = generateDemoFrame(demo, t);
-      await serialRef.current.sendFrame(imageData);
-      updateFps();
+    const startTime = Date.now();
+    const frameInterval = 1000 / DEMO_TARGET_FPS;
+    let lastFrameTime = performance.now();
+
+    const runDemo = (timestamp: number) => {
+      if (demoAnimationRef.current === null) return;
+
+      const elapsed = timestamp - lastFrameTime;
+      if (elapsed >= frameInterval) {
+        lastFrameTime = timestamp - (elapsed % frameInterval);
+        const t = (Date.now() - startTime) / 1000;
+        const imageData = generateDemoFrame(demo, t);
+        serialRef.current
+          .sendFrame(imageData)
+          .then((ok) => {
+            if (ok) updateFps();
+          })
+          .catch((err) => console.error('Demo send error:', err));
+      }
+
       demoAnimationRef.current = requestAnimationFrame(runDemo);
     };
 
-    runDemo();
+    demoAnimationRef.current = requestAnimationFrame(runDemo);
   };
 
   const handleStop = () => {
@@ -178,8 +225,8 @@ function App() {
               {connected && mode !== 'idle' && (
                 <div className="text-sm text-gray-600 mr-2">
                   FPS: <span className="font-mono font-bold">{fps}</span>{' '}
-                  Queue: <span className="font-mono font-bold">{txQueue}</span>{' '}
-                  Dropped: <span className="font-mono font-bold">{txDropped}</span>
+                  Drop: <span className="font-mono font-bold">{txDropped}</span>{' '}
+                  Err: <span className="font-mono font-bold">{txErrors}</span>
                 </div>
               )}
               {!connected ? (

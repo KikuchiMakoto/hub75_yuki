@@ -23,7 +23,7 @@ share/python-wheels/
 *.egg
 PIPFILE.lock
 
-# Python build directories (not web_application/src/lib)
+# Python build directories (not application_web/src/lib)
 /lib/
 /lib64/
 
@@ -52,9 +52,9 @@ Thumbs.db
 Desktop.ini
 
 # Web Application (Bun + React)
-web_application/node_modules/
-web_application/dist/
-web_application/.vite/
+application_web/node_modules/
+application_web/dist/
+application_web/.vite/
 
 # GitHub Pages (built by GitHub Actions)
 docs/

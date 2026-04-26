@@ -734,80 +734,72 @@ static void core1_process_one_packet(void) {
 /* ------------------------------------------------------------------------ */
 /*  Core0 USB / parsing                                                     */
 /* ------------------------------------------------------------------------ */
+
+/* Shared helper: ingest from a generic byte stream (CDC or Vendor/WebUSB). */
+#define INGEST_STREAM_BLOCKS(available_fn, read_fn) do { \
+    while (available_fn()) { \
+        uint32_t avail = available_fn(); \
+        if (avail == 0) break; \
+        if (g_usb_resync) { \
+            uint32_t req = min_u32(avail, (uint32_t)sizeof(trash)); \
+            uint32_t n = read_fn(trash, req); \
+            if (n == 0) break; \
+            g_rx_total_bytes += n; \
+            uint32_t idx = 0; \
+            sync_drop_until_delimiter(trash, &idx, n); \
+            continue; \
+        } \
+        usb_block_t *blk = &g_usb_blocks[g_usb_prod_idx]; \
+        if (blk->ready) { \
+            g_usb_block_ready_overrun++; \
+            uint32_t req = min_u32(avail, (uint32_t)sizeof(trash)); \
+            uint32_t n = read_fn(trash, req); \
+            if (n == 0) break; \
+            g_rx_total_bytes += n; \
+            g_usb_resync = true; \
+            g_dropped_frames_core0++; \
+            g_drop_packet_q_overrun++; \
+            for (uint32_t i = 0; i < USB_BLOCK_COUNT; ++i) { \
+                g_usb_blocks[i].len = 0; \
+                g_usb_blocks[i].ready = 0u; \
+            } \
+            g_usb_prod_idx = 0; \
+            g_usb_cons_idx = 0; \
+            g_usb_cons_pos = 0; \
+            g_parser_pos = 0; \
+            g_parser_discard = false; \
+            uint32_t idx = 0; \
+            sync_drop_until_delimiter(trash, &idx, n); \
+            continue; \
+        } \
+        uint32_t space = (uint32_t)USB_BLOCK_SIZE - blk->len; \
+        if (space == 0) { \
+            usb_publish_block(blk); \
+            continue; \
+        } \
+        uint32_t req = min_u32(avail, space); \
+        uint32_t n = read_fn(&blk->data[blk->len], req); \
+        if (n == 0) break; \
+        g_rx_total_bytes += n; \
+        blk->len = (uint16_t)(blk->len + n); \
+        if (blk->len == USB_BLOCK_SIZE) { \
+            usb_publish_block(blk); \
+        } \
+    } \
+    if (!available_fn()) { \
+        usb_publish_block(&g_usb_blocks[g_usb_prod_idx]); \
+    } \
+} while (0)
+
 static void ingest_usb_blocks(void) {
     static uint8_t trash[256];
 
-    while (tud_cdc_available()) {
-        uint32_t avail = tud_cdc_available();
-        if (avail == 0) {
-            break;
-        }
+    /* Pull from CDC ACM first (legacy path), then from Vendor/WebUSB. */
+    INGEST_STREAM_BLOCKS(tud_cdc_available, tud_cdc_read);
 
-        if (g_usb_resync) {
-            uint32_t req = min_u32(avail, (uint32_t)sizeof(trash));
-            uint32_t n = tud_cdc_read(trash, req);
-            if (n == 0) {
-                break;
-            }
-            g_rx_total_bytes += n;
-
-            uint32_t idx = 0;
-            sync_drop_until_delimiter(trash, &idx, n);
-            continue;
-        }
-
-        usb_block_t *blk = &g_usb_blocks[g_usb_prod_idx];
-        if (blk->ready) {
-            g_usb_block_ready_overrun++;
-            uint32_t req = min_u32(avail, (uint32_t)sizeof(trash));
-            uint32_t n = tud_cdc_read(trash, req);
-            if (n == 0) {
-                break;
-            }
-            g_rx_total_bytes += n;
-
-            g_usb_resync = true;
-            g_dropped_frames_core0++;
-            g_drop_packet_q_overrun++;
-
-            for (uint32_t i = 0; i < USB_BLOCK_COUNT; ++i) {
-                g_usb_blocks[i].len = 0;
-                g_usb_blocks[i].ready = 0u;
-            }
-            g_usb_prod_idx = 0;
-            g_usb_cons_idx = 0;
-            g_usb_cons_pos = 0;
-            g_parser_pos = 0;
-            g_parser_discard = false;
-
-            uint32_t idx = 0;
-            sync_drop_until_delimiter(trash, &idx, n);
-            continue;
-        }
-
-        uint32_t space = (uint32_t)USB_BLOCK_SIZE - blk->len;
-        if (space == 0) {
-            usb_publish_block(blk);
-            continue;
-        }
-
-        uint32_t req = min_u32(avail, space);
-        uint32_t n = tud_cdc_read(&blk->data[blk->len], req);
-        if (n == 0) {
-            break;
-        }
-
-        g_rx_total_bytes += n;
-        blk->len = (uint16_t)(blk->len + n);
-
-        if (blk->len == USB_BLOCK_SIZE) {
-            usb_publish_block(blk);
-        }
-    }
-
-    if (!tud_cdc_available()) {
-        usb_publish_block(&g_usb_blocks[g_usb_prod_idx]);
-    }
+#if CFG_TUD_VENDOR > 0
+    INGEST_STREAM_BLOCKS(tud_vendor_available, tud_vendor_read);
+#endif
 }
 
 static void parse_usb_stream_to_packets(void) {

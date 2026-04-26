@@ -136,7 +136,7 @@ RP2040 → PC:
 ## プロジェクト構造
 
 ```
-application/
+application_py/
 ├── pyproject.toml      # プロジェクト設定 (uv/pip互換)
 ├── README.md
 └── src/

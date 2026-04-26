@@ -104,10 +104,10 @@ pio run
 ## アプリケーション側
 
 ファームウェアの書き込み後、アプリケーション側から制御します。
-詳細は [../application/README.md](../application/README.md) を参照してください。
+詳細は [../application_py/README.md](../application_py/README.md) を参照してください。
 
 ```bash
-cd ../application
+cd ../application_py
 
 # デモアニメーション
 uv run led-matrix --demo rainbow

@@ -5,7 +5,7 @@ on:
     branches:
       - main
     paths:
-      - 'web_application/**'
+      - 'application_web/**'
       - '.github/workflows/deploy-web.yml'
   workflow_dispatch:
 
@@ -32,11 +32,11 @@ jobs:
         uses: oven-sh/setup-bun@v1
 
       - name: Install dependencies
-        working-directory: ./web_application
+        working-directory: ./application_web
         run: bun install
 
       - name: Build
-        working-directory: ./web_application
+        working-directory: ./application_web
         run: bun run build
 
       - name: Setup Pages
@@ -45,7 +45,7 @@ jobs:
       - name: Upload artifact
         uses: actions/upload-pages-artifact@v3
         with:
-          path: './web_application/dist'
+          path: './application_web/dist'
 
       - name: Deploy to GitHub Pages
         id: deployment

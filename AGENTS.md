@@ -2,12 +2,11 @@
 This guide is for agentic coding assistants operating in this repository.
 
 ## 1) Repository Map
-- `application/`: Python CLI sender/controller (`uv` managed).
-- `web_application/`: React + TypeScript + Bun + Vite.
+- `application_py/`: Python CLI sender/controller (`uv` managed).
+- `application_web/`: React + TypeScript + Bun + Vite.
 - `firmware/`: RP2040 firmware (PlatformIO + Arduino core). 現在もっとも安定した実装。
 - `firmware_v2/`: RP2040 firmware (PlatformIO + pico-sdk + TinyUSB). WIP だが動作する可能性が高い。
 - `firmware_v3/`: RP2040 firmware (PlatformIO + pico-sdk + TinyUSB). WIP だが動作する可能性が高い。
-- `firmware_ch32v305/`: ⚠️ **強く WIP**。現状ほぼビルド産物のみ。ソースファイルが追加されるまで実験的扱い。
 - `kicad_pcb/`: hardware design assets (not software build targets).
 
 ## 2) Cursor / Copilot Rule Files
@@ -28,10 +27,10 @@ If added later, treat them as higher-priority repository-local instructions.
 ## 4) Build / Lint / Test Commands
 Run commands from each subproject directory unless noted.
 
-### application (Python)
+### application_py (Python)
 Install (with dev deps):
 ```bash
-cd application
+cd application_py
 uv sync --extra dev
 ```
 Run app:
@@ -55,10 +54,10 @@ Run a single test:
 uv run pytest tests/test_file.py::test_name -q
 ```
 
-### web_application (Bun + React + TypeScript)
+### application_web (Bun + React + TypeScript)
 Install and start dev server:
 ```bash
-cd web_application
+cd application_web
 bun install
 bun run dev
 ```
@@ -69,7 +68,7 @@ bun run preview
 bunx tsc --noEmit
 ```
 Tests:
-- No test script currently exists in `web_application/package.json`.
+- No test script currently exists in `application_web/package.json`.
 - If tests are added, add a script and document single-test invocation.
 
 ### firmware (RP2040 Arduino + PlatformIO)
@@ -126,13 +125,13 @@ python tools/bench_stream.py --port COM5 --fps 145 --duration 10 --cache-frames 
 > **更新レート（FPS）について**: これは**緩いルール**です。目標FPSはファームウェアの実装・最適化状況次第で変化します。クライアント側はできる限りのレートで送信し、ファームウェア側が受信・描画可能なタイミングで処理します。プロトコル形式（RGB565 + COBS + 0x00）を守ることが最優先です。
 
 プロトコル動作を変更する場合、以下の関連パスをすべて同時に更新してください：
-- `application/src/led_matrix_controller/*`
-- `web_application/src/lib/{cobs,serial,media}.ts`
+- `application_py/src/led_matrix_controller/*`
+- `application_web/src/lib/{cobs,serial,media}.ts`
 - `firmware/src/main.cpp`
 - `firmware_v2/src/{main.c,cobs.c}`
 - `firmware_v3/src/{main.c,cobs.c}`
 
-### 5.2 Python conventions (`application/`)
+### 5.2 Python conventions (`application_py/`)
 - Formatting: Black (`line-length = 100`).
 - Lint baseline: Ruff rules (`E`, `F`, `W`).
 - Import order: stdlib -> third-party -> local modules.
@@ -140,7 +139,7 @@ python tools/bench_stream.py --port COM5 --fps 145 --duration 10 --cache-frames 
 - Types: add type hints for public APIs and non-trivial helpers.
 - Error handling: raise explicit exceptions in lower layers; handle user-facing errors in CLI entrypoints.
 
-### 5.3 TypeScript/React conventions (`web_application/`)
+### 5.3 TypeScript/React conventions (`application_web/`)
 - Keep strict typing behavior (`strict: true`).
 - Prefer explicit return types on exported functions/classes.
 - Import order: external -> internal -> `import type`.

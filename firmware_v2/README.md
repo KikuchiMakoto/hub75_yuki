@@ -71,7 +71,7 @@ Notes for PlatformIO build:
 
 ## Throughput/Performance Benchmark
 
-`application/src/led_matrix_controller/controller.py:29` sets `MAX_VIDEO_FPS = 18`, so the app path is not suitable for measuring firmware ceiling.
+`application_py/src/led_matrix_controller/controller.py:29` sets `MAX_VIDEO_FPS = 18`, so the app path is not suitable for measuring firmware ceiling.
 
 Use the dedicated benchmark sender that bypasses this cap:
 

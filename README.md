@@ -4,12 +4,12 @@
 
 ## プロジェクト構成
 
-このプロジェクトは、**Application**、**Web Application**、**Firmware**、**KiCad PCB** の4つのコンポーネントで構成されています：
+このプロジェクトは、**Application (Python)**、**Application (Web)**、**Firmware**、**KiCad PCB** の4つのコンポーネントで構成されています：
 
 ```
-├── application/        # Python制御アプリケーション (PC側)
+├── application_py/     # Python制御アプリケーション (PC側)
 │   └── src/           # LED Matrix Controller (画像/動画/カメラ/テキスト表示)
-├── web_application/   # Webアプリケーション (ブラウザ側)
+├── application_web/   # Webアプリケーション (ブラウザ側)
 │   └── src/           # React + TypeScript (Web Serial API対応)
 ├── firmware/          # RP2040ファームウェア (Arduino core、安定動作)
 │   └── src/           # HUB75ドライバ (PlatformIO/Arduino)
@@ -25,8 +25,8 @@
 - **Firmware** (`firmware/`): RP2040上で動作するC++コード。HUB75パネルの駆動、PIO/DMAによる高速出力、USB CDCによるCOBSデータ受信、RGB565からBCM変換を担当。現在もっとも安定した実装
 - **Firmware v2** (`firmware_v2/`): pico-sdk + TinyUSBベース。最適化されたLED表示fps向上機能改善版
 - **Firmware v3** (`firmware_v3/`): pico-sdk + TinyUSBベース。9bit native BCM高画質版
-- **Application** (`application/`): PC上で動作するPythonコード。画像/動画読み込み、リサイズ、RGB565変換、COBSエンコード、シリアル通信を担当
-- **Web Application** (`web_application/`): ブラウザで動作するWebアプリケーション。Web Serial APIを使用してUSB経由で制御
+- **Application (Python)** (`application_py/`): PC上で動作するPythonコード。画像/動画読み込み、リサイズ、RGB565変換、COBSエンコード、シリアル通信を担当
+- **Application (Web)** (`application_web/`): ブラウザで動作するWebアプリケーション。Web Serial APIを使用してUSB経由で制御
 - **KiCad PCB** (`kicad_pcb/`): 回路図シンボル/フットプリント/基板レイアウトなどのハードウェア設計データを管理
 
 ### 通信プロトコル（絶対的ルール）
@@ -58,7 +58,7 @@
 ### 必要なツール
 
 - **Firmware用**: [PlatformIO](https://platformio.org/) - RP2040へのファームウェア書き込み
-- **Application用**: [uv](https://docs.astral.sh/uv/) - Pythonパッケージマネージャー
+- **Application (Python) 用**: [uv](https://docs.astral.sh/uv/) - Pythonパッケージマネージャー
 
 ### セットアップ手順
 
@@ -71,7 +71,7 @@ pio run -t upload
 
 RP2040にファームウェアが書き込まれ、HUB75パネルの駆動が可能になります。
 
-#### 2. Applicationを実行 (PC側)
+#### 2. Application (Python) を実行 (PC側)
 
 uvをインストール:
 ```bash
@@ -84,7 +84,7 @@ powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | ie
 
 アプリケーションを実行:
 ```bash
-cd application
+cd application_py
 
 # デモアニメーション
 uv run led-matrix --demo rainbow
@@ -96,12 +96,12 @@ uv run led-matrix --image photo.jpg
 uv run led-matrix --help
 ```
 
-#### 3. Web Applicationを使用 (ブラウザ側)
+#### 3. Application (Web) を使用 (ブラウザ側)
 
 Web Serial APIを使用してブラウザから直接制御することもできます：
 
 ```bash
-cd web_application
+cd application_web
 bun install
 bun run dev
 ```
@@ -109,8 +109,8 @@ bun run dev
 ブラウザで `http://localhost:5173` を開き、画像・動画のドラッグアンドドロップやデモアニメーションを実行できます。
 
 詳細は各ディレクトリのREADMEを参照してください:
-- [Application README](application/README.md)
-- [Web Application README](web_application/README.md)
+- [Application (Python) README](application_py/README.md)
+- [Application (Web) README](application_web/README.md)
 - [Firmware README](firmware/README.md)
 - [KiCad PCB データ](kicad_pcb/)
 
