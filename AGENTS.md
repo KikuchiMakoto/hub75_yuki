@@ -4,9 +4,10 @@ This guide is for agentic coding assistants operating in this repository.
 ## 1) Repository Map
 - `application/`: Python CLI sender/controller (`uv` managed).
 - `web_application/`: React + TypeScript + Bun + Vite.
-- `firmware/`: RP2040 firmware (PlatformIO + Arduino core).
-- `firmware_v2/`: RP2040 firmware (PlatformIO + pico-sdk + TinyUSB).
-- `firmware_ch32v305/`: mostly build artifacts in this checkout.
+- `firmware/`: RP2040 firmware (PlatformIO + Arduino core). 現在もっとも安定した実装。
+- `firmware_v2/`: RP2040 firmware (PlatformIO + pico-sdk + TinyUSB). WIP だが動作する可能性が高い。
+- `firmware_v3/`: RP2040 firmware (PlatformIO + pico-sdk + TinyUSB). WIP だが動作する可能性が高い。
+- `firmware_ch32v305/`: ⚠️ **強く WIP**。現状ほぼビルド産物のみ。ソースファイルが追加されるまで実験的扱い。
 - `kicad_pcb/`: hardware design assets (not software build targets).
 
 ## 2) Cursor / Copilot Rule Files
@@ -114,17 +115,22 @@ python tools/bench_stream.py --port COM5 --fps 145 --duration 10 --cache-frames 
 ## 5) Code Style Guidelines
 
 ### 5.1 Protocol invariants (cross-project, critical)
-Unless explicitly requested, preserve these wire-level assumptions:
-- RGB565 little-endian frame payload.
-- COBS encoding.
-- Trailing `0x00` frame delimiter.
-- Default panel assumption `128x32`.
+以下のワイヤーレベル条件は**絶対的な不変条件**です。明示的な要求がない限り、これらを変更しないでください：
 
-If protocol behavior changes, update all related paths together:
+- **インターフェース**: USB CDC ACM
+- **ペイロード形式**: RGB565 リトルエンディアン
+- **エンコーディング**: COBS (Consistent Overhead Byte Stuffing)
+- **フレーム区切り**: 末尾 `0x00`
+- **デフォルト解像度**: `128x32`
+
+> **更新レート（FPS）について**: これは**緩いルール**です。目標FPSはファームウェアの実装・最適化状況次第で変化します。クライアント側はできる限りのレートで送信し、ファームウェア側が受信・描画可能なタイミングで処理します。プロトコル形式（RGB565 + COBS + 0x00）を守ることが最優先です。
+
+プロトコル動作を変更する場合、以下の関連パスをすべて同時に更新してください：
 - `application/src/led_matrix_controller/*`
 - `web_application/src/lib/{cobs,serial,media}.ts`
 - `firmware/src/main.cpp`
 - `firmware_v2/src/{main.c,cobs.c}`
+- `firmware_v3/src/{main.c,cobs.c}`
 
 ### 5.2 Python conventions (`application/`)
 - Formatting: Black (`line-length = 100`).

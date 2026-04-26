@@ -11,19 +11,38 @@
 │   └── src/           # LED Matrix Controller (画像/動画/カメラ/テキスト表示)
 ├── web_application/   # Webアプリケーション (ブラウザ側)
 │   └── src/           # React + TypeScript (Web Serial API対応)
-├── firmware_ch32v305/ # CH32V305ファームウェア (高速化アーキテクチャ)
+├── firmware/          # RP2040ファームウェア (Arduino core、安定動作)
+│   └── src/           # HUB75ドライバ (PlatformIO/Arduino)
+├── firmware_v2/       # RP2040ファームウェア (pico-sdk + TinyUSB、WIPだが動作可能性高)
+│   └── src/
+├── firmware_v3/       # RP2040ファームウェア (pico-sdk + TinyUSB、WIPだが動作可能性高)
+│   └── src/
+├── firmware_ch32v305/ # CH32V305ファームウェア ⚠️ 強くWIP、現状ほぼビルド産物のみ
 │   └── src/           # USBHS受信/COBS復元/BCM変換パイプライン
-├── kicad_pcb/         # KiCad設計データ (基板レイアウト/ライブラリ)
-└── firmware/          # RP2040ファームウェア (マイコン側)
-    └── src/           # HUB75ドライバ (PlatformIO/Arduino)
+└── kicad_pcb/         # KiCad設計データ (基板レイアウト/ライブラリ)
 ```
 
 ### 役割分担
 
-- **Firmware** (`firmware/`): RP2040上で動作するC++コード。HUB75パネルの駆動、PIO/DMAによる高速出力、USB CDCによるCOBSデータ受信、RGB565からBCM変換を担当
+- **Firmware** (`firmware/`): RP2040上で動作するC++コード。HUB75パネルの駆動、PIO/DMAによる高速出力、USB CDCによるCOBSデータ受信、RGB565からBCM変換を担当。現在もっとも安定した実装
+- **Firmware v2** (`firmware_v2/`): pico-sdk + TinyUSBベース。WIPだが動作する可能性が高い
+- **Firmware v3** (`firmware_v3/`): pico-sdk + TinyUSBベース。WIPだが動作する可能性が高い
+- **Firmware CH32V305** (`firmware_ch32v305/`): ⚠️ **強くWIP**。現状ほぼビルド産物のみ。ソースファイルが追加されない限り、実験的扱い
 - **Application** (`application/`): PC上で動作するPythonコード。画像/動画読み込み、リサイズ、RGB565変換、COBSエンコード、シリアル通信を担当
 - **Web Application** (`web_application/`): ブラウザで動作するWebアプリケーション。Web Serial APIを使用してUSB経由で制御
 - **KiCad PCB** (`kicad_pcb/`): 回路図シンボル/フットプリント/基板レイアウトなどのハードウェア設計データを管理
+
+### 通信プロトコル（絶対的ルール）
+
+すべてのファームウェア・クライアント間で、以下のプロトコルは**絶対的な不変条件**です：
+
+- **インターフェース**: USB CDC ACM
+- **ペイロード形式**: RGB565 リトルエンディアン
+- **エンコーディング**: COBS (Consistent Overhead Byte Stuffing)
+- **フレーム区切り**: 末尾 `0x00`
+- **解像度**: **128 × 32**（デフォルト。変更する場合はファームウェアとクライアント双方を同期すること）
+
+> **更新レート（FPS）について**: これは**緩いルール**です。目標FPSはファームウェアの実装・最適化状況次第で変化します。クライアント側はできる限りのレートで送信し、ファームウェア側が受信・描画可能なタイミングで処理します。プロトコル形式（RGB565+COBS+0x00）を守ることが最優先です。
 
 ## 特徴
 
