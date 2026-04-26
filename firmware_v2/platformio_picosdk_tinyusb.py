@@ -24,6 +24,7 @@ if framework_dir:
         ],
     )
 
+    # TinyUSB sources — these are NOT automatically added by the pico-sdk builder
     env.BuildSources(
         join("$BUILD_DIR", "PicoSDKTinyUSB"),
         join(framework_dir, "lib", "tinyusb", "src"),
@@ -37,32 +38,18 @@ if framework_dir:
         " +<portable/raspberrypi/rp2040/rp2040_usb.c>",
     )
 
+    # pico_fix for RP2040 USB enumeration workaround
     env.BuildSources(
         join("$BUILD_DIR", "PicoSDKPicoFix"),
         join(framework_dir, "src", "rp2_common", "pico_fix"),
     )
 
-    env.BuildSources(
-        join("$BUILD_DIR", "PicoSDKMultiCore"),
-        join(framework_dir, "src", "rp2_common", "pico_multicore"),
-    )
-
-    env.BuildSources(
-        join("$BUILD_DIR", "PicoSDKUniqueId"),
-        join(framework_dir, "src", "rp2_common", "pico_unique_id"),
-    )
-
-    env.BuildSources(
-        join("$BUILD_DIR", "PicoSDKHardwareFlash"),
-        join(framework_dir, "src", "rp2_common", "hardware_flash"),
-    )
-
-    env.BuildSources(
-        join("$BUILD_DIR", "PicoSDKHardwareXipCache"),
-        join(framework_dir, "src", "rp2_common", "hardware_xip_cache"),
-    )
-
-    env.BuildSources(
-        join("$BUILD_DIR", "PicoSDKPlatform"),
-        join(framework_dir, "src", "rp2040", "pico_platform"),
-    )
+    # NOTE: The following libraries are now automatically linked by the
+    # platform-raspberrypi pico-sdk builder (v1.19.0+). Manually adding
+    # them here causes duplicate symbol errors at link time.
+    #
+    # - pico_multicore    -> automatically handled
+    # - pico_unique_id    -> automatically handled
+    # - hardware_flash    -> automatically handled
+    # - hardware_xip_cache -> automatically handled
+    # - pico_platform     -> automatically handled
