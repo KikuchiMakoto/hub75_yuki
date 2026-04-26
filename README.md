@@ -4,7 +4,7 @@
 
 ## プロジェクト構成
 
-このプロジェクトは、**Application**、**Web Application**、**Firmware**、**Firmware(CH32V305)**、**KiCad PCB** の5つのコンポーネントで構成されています：
+このプロジェクトは、**Application**、**Web Application**、**Firmware**、**KiCad PCB** の4つのコンポーネントで構成されています：
 
 ```
 ├── application/        # Python制御アプリケーション (PC側)
@@ -17,17 +17,14 @@
 │   └── src/
 ├── firmware_v3/       # RP2040ファームウェア (pico-sdk + TinyUSB、WIPだが動作可能性高)
 │   └── src/
-├── firmware_ch32v305/ # CH32V305ファームウェア ⚠️ 強くWIP、現状ほぼビルド産物のみ
-│   └── src/           # USBHS受信/COBS復元/BCM変換パイプライン
 └── kicad_pcb/         # KiCad設計データ (基板レイアウト/ライブラリ)
 ```
 
 ### 役割分担
 
 - **Firmware** (`firmware/`): RP2040上で動作するC++コード。HUB75パネルの駆動、PIO/DMAによる高速出力、USB CDCによるCOBSデータ受信、RGB565からBCM変換を担当。現在もっとも安定した実装
-- **Firmware v2** (`firmware_v2/`): pico-sdk + TinyUSBベース。WIPだが動作する可能性が高い
-- **Firmware v3** (`firmware_v3/`): pico-sdk + TinyUSBベース。WIPだが動作する可能性が高い
-- **Firmware CH32V305** (`firmware_ch32v305/`): ⚠️ **強くWIP**。現状ほぼビルド産物のみ。ソースファイルが追加されない限り、実験的扱い
+- **Firmware v2** (`firmware_v2/`): pico-sdk + TinyUSBベース。最適化されたLED表示fps向上機能改善版
+- **Firmware v3** (`firmware_v3/`): pico-sdk + TinyUSBベース。9bit native BCM高画質版
 - **Application** (`application/`): PC上で動作するPythonコード。画像/動画読み込み、リサイズ、RGB565変換、COBSエンコード、シリアル通信を担当
 - **Web Application** (`web_application/`): ブラウザで動作するWebアプリケーション。Web Serial APIを使用してUSB経由で制御
 - **KiCad PCB** (`kicad_pcb/`): 回路図シンボル/フットプリント/基板レイアウトなどのハードウェア設計データを管理

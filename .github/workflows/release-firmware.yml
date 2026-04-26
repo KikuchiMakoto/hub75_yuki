@@ -1,0 +1,110 @@
+name: Release Firmware
+
+on:
+  push:
+    tags:
+      - 'firmware-*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: firmware
+            dir: firmware
+            env: pico
+          - name: firmware_v2
+            dir: firmware_v2
+            env: pico_picosdk
+          - name: firmware_v3
+            dir: firmware_v3
+            env: pico_picosdk
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Cache PlatformIO
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.platformio
+            ~/.cache/pip
+          key: platformio-${{ runner.os }}-${{ hashFiles('**/platformio.ini') }}
+
+      - name: Install PlatformIO
+        run: |
+          pip install --upgrade platformio
+          pio --version
+
+      - name: Build ${{ matrix.name }}
+        working-directory: ./${{ matrix.dir }}
+        run: |
+          pio run -e ${{ matrix.env }}
+
+      - name: Rename artifact
+        run: |
+          cp ${{ matrix.dir }}/.pio/build/${{ matrix.env }}/firmware.uf2 ${{ matrix.name }}.uf2
+          ls -la ${{ matrix.name }}.uf2
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.name }}
+          path: ${{ matrix.name }}.uf2
+          retention-days: 1
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: List artifacts
+        run: |
+          ls -la artifacts/
+
+      - name: Get short hash
+        id: hash
+        run: |
+          SHORT=$(git rev-parse --short HEAD)
+          echo "short=${SHORT}" >> "$GITHUB_OUTPUT"
+          echo "Short hash: ${SHORT}"
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: Firmware-${{ steps.hash.outputs.short }}
+          name: Firmware ${{ steps.hash.outputs.short }}
+          body: |
+            Auto-generated firmware release.
+
+            | File | Description |
+            |------|-------------|
+            | `firmware.uf2` | Original Arduino-core firmware (6-bit BCM) |
+            | `firmware_v2.uf2` | Optimized pico-sdk firmware (6-bit BCM) |
+            | `firmware_v3.uf2` | High-performance pico-sdk firmware (9-bit native BCM) |
+
+            Built from commit `${{ steps.hash.outputs.short }}`.
+          files: artifacts/*.uf2
+          fail_on_unmatched_files: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

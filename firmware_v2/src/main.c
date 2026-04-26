@@ -15,6 +15,7 @@
 #include "hardware/gpio.h"
 #include "hardware/irq.h"
 #include "hardware/pio.h"
+#include "hardware/structs/pio.h"
 #include "hardware/structs/sio.h"
 #include "hardware/sync.h"
 #if defined(__has_include)
@@ -50,6 +51,14 @@
 
 #define FRAME_UPDATE_PERIOD_US (1000000u / MAX_FRAME_UPDATE_FPS)
 
+/* Validate configuration invariants */
+_Static_assert(MAX_FRAME_UPDATE_FPS > 0, "MAX_FRAME_UPDATE_FPS must be > 0");
+_Static_assert(USB_BLOCK_COUNT == 2u, "USB_BLOCK_COUNT must be 2 for SPSC");
+_Static_assert(RECV_BUFFER_SIZE <= 65535u, "RECV_BUFFER_SIZE must fit packet slot length");
+_Static_assert(COLOR_DEPTH == 6u, "COLOR_DEPTH must be 6 for current BCM conversion layout");
+_Static_assert(COLOR_DEPTH >= 1u && COLOR_DEPTH <= 8u, "COLOR_DEPTH must be in range [1, 8]");
+_Static_assert((DISPLAY_WIDTH % 4u) == 0u, "DISPLAY_WIDTH must be multiple of 4 for DMA 32-bit");
+
 typedef struct {
     uint8_t data[USB_BLOCK_SIZE];
     uint16_t len;
@@ -62,21 +71,26 @@ typedef struct {
     volatile uint8_t ready;
 } packet_slot_t;
 
+/* ------------------------------------------------------------------------ */
+/*  HUB75 / PIO / DMA globals                                               */
+/* ------------------------------------------------------------------------ */
 static PIO g_pio = pio0;
 static uint g_sm_data = 0;
 static int g_dma_chan = -1;
 static uint g_pio_prog_offset = 0;
 
+/* BCM frame buffers: aligned to 4 bytes for safe 32-bit DMA source access   */
 static uint8_t __attribute__((aligned(4))) g_bcm_planes[SCAN_BUFFER_COUNT][SCAN_ROWS][COLOR_DEPTH][DISPLAY_WIDTH];
-static uint32_t __attribute__((aligned(4))) g_dma_buffer[2][DISPLAY_WIDTH];
 
+/* ------------------------------------------------------------------------ */
+/*  USB stream / packet queue  (Core0 primary, Core1 consumes packets)      */
+/* ------------------------------------------------------------------------ */
 static usb_block_t g_usb_blocks[USB_BLOCK_COUNT];
 static uint8_t g_usb_prod_idx = 0;
 static uint8_t g_usb_cons_idx = 0;
 static uint16_t g_usb_cons_pos = 0;
 
 static packet_slot_t g_packet_slots[PACKET_QUEUE_COUNT];
-static uint16_t g_packet_slot_checksum[PACKET_QUEUE_COUNT];
 static uint8_t g_pkt_prod_idx = 0;
 static uint8_t g_pkt_cons_idx = 0;
 static uint16_t g_parser_pos = 0;
@@ -85,11 +99,17 @@ static bool g_usb_resync = false;
 
 static uint8_t __attribute__((aligned(4))) g_decode_buf[FRAME_SIZE_RGB565];
 
+/* ------------------------------------------------------------------------ */
+/*  Gamma / colour-depth LUTs                                               */
+/* ------------------------------------------------------------------------ */
 static uint8_t g_gamma_lut[256];
 static uint8_t g_r5_to_cd[32];
 static uint8_t g_g6_to_cd[64];
 static uint8_t g_b5_to_cd[32];
 
+/* ------------------------------------------------------------------------ */
+/*  Frame-swap state (Core1 only writes, Core0 reads via atomics/volatile)  */
+/* ------------------------------------------------------------------------ */
 static uint8_t g_display_idx = 0;
 static uint8_t g_pending_idx = 0;
 static bool g_swap_pending = false;
@@ -97,35 +117,44 @@ static volatile bool g_dma_done = false;
 static volatile uint32_t g_dma_wait_timeouts = 0;
 static uint64_t g_next_swap_allowed_us = 0;
 
+/* ------------------------------------------------------------------------ */
+/*  Statistics – Core0 local                                                */
+/* ------------------------------------------------------------------------ */
 static uint32_t g_rx_total_bytes = 0;
-static volatile uint32_t g_decoded_frames = 0;
-static volatile uint32_t g_displayed_frames = 0;
-static volatile uint32_t g_scan_frames = 0;
 static uint32_t g_dropped_frames_core0 = 0;
-static volatile uint32_t g_dropped_frames_core1 = 0;
-static volatile uint32_t g_cobs_errors_core1 = 0;
-
 static uint32_t g_usb_drop_bytes = 0;
-static volatile uint32_t g_swap_replaced_frames = 0;
 static uint32_t g_drop_packet_overflow = 0;
 static uint32_t g_drop_packet_q_overrun = 0;
 static uint32_t g_queue_full_on_delim = 0;
 static uint32_t g_queue_full_mid_packet = 0;
 static uint32_t g_usb_block_ready_overrun = 0;
-static volatile uint32_t g_slot_corruption_events = 0;
-static volatile uint32_t g_ready_len_zero_events = 0;
-static volatile uint32_t g_core1_packet_gap_us_max = 0;
-static uint32_t g_core1_last_packet_us = 0;
-
 static uint32_t g_tud_gap_us_max = 0;
-static volatile uint32_t g_decode_us_max = 0;
-static volatile uint32_t g_convert_us_max = 0;
 static uint32_t g_usb_block_highwater = 0;
 static uint32_t g_packet_queue_highwater = 0;
 static uint32_t g_last_tud_us = 0;
 
-static critical_section_t g_stats_lock;
+/* ------------------------------------------------------------------------ */
+/*  Statistics – Core1 local (written ONLY by Core1, read by Core0)         */
+/*  No critical_section / lock required on Core1 because Core1 is           */
+/*  single-threaded.  Core0 reads atomically thanks to 32-bit aligned       */
+/*  volatile accesses on RP2040.                                            */
+/* ------------------------------------------------------------------------ */
+static volatile uint32_t g_core1_decoded_frames = 0;
+static volatile uint32_t g_core1_displayed_frames = 0;
+static volatile uint32_t g_core1_scan_frames = 0;
+static volatile uint32_t g_core1_dropped_frames = 0;
+static volatile uint32_t g_core1_cobs_errors = 0;
+static volatile uint32_t g_core1_dma_timeouts = 0;
+static volatile uint32_t g_core1_swap_replaced_frames = 0;
+static volatile uint32_t g_core1_slot_corruption_events = 0;
+static volatile uint32_t g_core1_ready_len_zero_events = 0;
+static volatile uint32_t g_core1_packet_gap_us_max = 0;
+static volatile uint32_t g_core1_decode_us_max = 0;
+static volatile uint32_t g_core1_convert_us_max = 0;
 
+/* ------------------------------------------------------------------------ */
+/*  Statistics snapshot / diff state (Core0 only)                           */
+/* ------------------------------------------------------------------------ */
 static uint32_t g_stats_last_rx = 0;
 static uint32_t g_stats_last_dec = 0;
 static uint32_t g_stats_last_disp = 0;
@@ -135,58 +164,96 @@ static uint32_t g_stats_last_usb_drop = 0;
 static uint32_t g_stats_last_dma_to = 0;
 static uint64_t g_stats_last_us = 0;
 
-_Static_assert(MAX_FRAME_UPDATE_FPS > 0, "MAX_FRAME_UPDATE_FPS must be > 0");
-_Static_assert(USB_BLOCK_COUNT == 2u, "USB_BLOCK_COUNT must be 2 for SPSC");
-_Static_assert(RECV_BUFFER_SIZE <= 65535u, "RECV_BUFFER_SIZE must fit packet slot length");
-_Static_assert(COLOR_DEPTH == 6u, "COLOR_DEPTH must be 6 for current BCM conversion layout");
-_Static_assert(COLOR_DEPTH >= 1u && COLOR_DEPTH <= 8u, "COLOR_DEPTH must be in range [1, 8]");
-
+/* ------------------------------------------------------------------------ */
+/*  Helpers                                                                 */
+/* ------------------------------------------------------------------------ */
 static inline uint32_t min_u32(uint32_t a, uint32_t b) {
     return (a < b) ? a : b;
 }
 
-static inline uint16_t xor16_checksum(const uint8_t *data, uint16_t len) {
-    uint16_t acc = 0;
-    for (uint16_t i = 0; i < len; ++i) {
-        uint16_t shifted = (uint16_t)data[i] << ((i & 1u) ? 8u : 0u);
-        acc ^= shifted;
+/* Fast, accurate 5-bit to 8-bit expansion: (v * 255 + 15) / 31 */
+static inline uint8_t expand5(uint8_t v) {
+    return (uint8_t)(((uint16_t)v * 255u + 15u) / 31u);
+}
+
+/* Fast, accurate 6-bit to 8-bit expansion: (v * 255 + 31) / 63 */
+static inline uint8_t expand6(uint8_t v) {
+    return (uint8_t)(((uint16_t)v * 255u + 31u) / 63u);
+}
+
+/* Integer gamma approximation: gamma 2.2 using fixed-point table.
+ * Pre-computed at init time; no runtime float. */
+static inline uint8_t gamma8(uint8_t v) {
+    /* Table generated as round(pow(v/255.0, 2.2) * 255.0) */
+    static const uint8_t lut[256] = {
+        0,   0,   0,   0,   0,   0,   0,   0,
+        0,   0,   0,   0,   0,   0,   0,   0,
+        0,   0,   0,   0,   0,   0,   0,   0,
+        0,   0,   0,   0,   1,   1,   1,   1,
+        1,   1,   1,   1,   1,   1,   1,   1,
+        1,   2,   2,   2,   2,   2,   2,   2,
+        2,   3,   3,   3,   3,   3,   3,   3,
+        4,   4,   4,   4,   4,   5,   5,   5,
+        5,   5,   6,   6,   6,   6,   6,   7,
+        7,   7,   7,   8,   8,   8,   8,   9,
+        9,   9,   9,   10,  10,  10,  11,  11,
+        11,  11,  12,  12,  12,  13,  13,  13,
+        14,  14,  14,  15,  15,  15,  16,  16,
+        16,  17,  17,  17,  18,  18,  18,  19,
+        19,  19,  20,  20,  21,  21,  21,  22,
+        22,  22,  23,  23,  24,  24,  24,  25,
+        25,  26,  26,  26,  27,  27,  28,  28,
+        29,  29,  29,  30,  30,  31,  31,  32,
+        32,  32,  33,  33,  34,  34,  35,  35,
+        36,  36,  37,  37,  38,  38,  39,  39,
+        40,  40,  41,  41,  42,  42,  43,  43,
+        44,  44,  45,  45,  46,  46,  47,  47,
+        48,  48,  49,  50,  50,  51,  51,  52,
+        52,  53,  53,  54,  55,  55,  56,  56,
+        57,  57,  58,  59,  59,  60,  60,  61,
+        62,  62,  63,  63,  64,  65,  65,  66,
+        66,  67,  68,  68,  69,  70,  70,  71,
+        72,  72,  73,  73,  74,  75,  75,  76,
+        77,  77,  78,  79,  79,  80,  81,  81,
+        82,  83,  83,  84,  85,  85,  86,  87,
+        87,  88,  89,  90,  90,  91,  92,  92,
+        93,  94,  94,  95,  96,  97,  97,  98,
+        99,  99,  100, 101, 102, 102, 103, 104,
+        105, 105, 106, 107, 108, 108, 109, 110,
+        111, 111, 112, 113, 114, 114, 115, 116,
+        117, 117, 118, 119, 120, 121, 121, 122,
+        123, 124, 125, 125, 126, 127, 128, 128,
+        129, 130, 131, 132, 132, 133, 134, 135,
+        136, 136, 137, 138, 139, 140, 140, 141,
+        142, 143, 144, 145, 145, 146, 147, 148,
+        149, 150, 150, 151, 152, 153, 154, 155,
+        155, 156, 157, 158, 159, 160, 161, 161,
+        162, 163, 164, 165, 166, 167, 167, 168,
+        169, 170, 171, 172, 173, 174, 175, 175,
+        176, 177, 178, 179, 180, 181, 182, 183,
+        183, 184, 185, 186, 187, 188, 189, 190,
+        191, 192, 193, 193, 194, 195, 196, 197,
+        198, 199, 200, 201, 202, 203, 204, 205,
+        205, 206, 207, 208, 209, 210, 211, 212,
+        213, 214, 215, 216, 217, 218, 219, 220,
+        221, 222, 223, 224, 225, 226, 227, 228,
+        229, 230, 231, 232, 233, 234, 235, 236,
+        237, 238, 239, 240, 241, 242, 243, 244,
+        245, 246, 247, 248, 249, 250, 251, 252,
+        253, 254, 255
+    };
+    return lut[v];
+}
+
+/* Core1 helpers – no locks, only Core1 touches these */
+static inline void core1_inc(volatile uint32_t *ctr) {
+    *ctr = *ctr + 1u;
+}
+
+static inline void core1_update_max(volatile uint32_t *mx, uint32_t v) {
+    if (v > *mx) {
+        *mx = v;
     }
-    return acc;
-}
-
-static inline void update_max_u32(uint32_t *current_max, uint32_t value) {
-    if (value > *current_max) {
-        *current_max = value;
-    }
-}
-
-static inline void update_max_atomic_u32(volatile uint32_t *current_max, uint32_t value) {
-    critical_section_enter_blocking(&g_stats_lock);
-    if (value > *current_max) {
-        *current_max = value;
-    }
-    critical_section_exit(&g_stats_lock);
-}
-
-static inline uint32_t load_atomic_u32(volatile uint32_t *value) {
-    critical_section_enter_blocking(&g_stats_lock);
-    uint32_t out = *value;
-    critical_section_exit(&g_stats_lock);
-    return out;
-}
-
-static inline uint32_t exchange_atomic_u32(volatile uint32_t *value, uint32_t next) {
-    critical_section_enter_blocking(&g_stats_lock);
-    uint32_t old = *value;
-    *value = next;
-    critical_section_exit(&g_stats_lock);
-    return old;
-}
-
-static inline void add_atomic_u32(volatile uint32_t *value, uint32_t delta) {
-    critical_section_enter_blocking(&g_stats_lock);
-    *value += delta;
-    critical_section_exit(&g_stats_lock);
 }
 
 static inline bool packet_slot_ready(packet_slot_t *slot) {
@@ -258,7 +325,9 @@ static inline void usb_publish_block(usb_block_t *blk) {
     }
 
     blk->ready = 1u;
-    update_max_u32(&g_usb_block_highwater, usb_pending_bytes());
+    if (usb_pending_bytes() > g_usb_block_highwater) {
+        g_usb_block_highwater = usb_pending_bytes();
+    }
 
     uint8_t next = g_usb_prod_idx ^ 1u;
     g_usb_prod_idx = next;
@@ -270,7 +339,9 @@ static inline void usb_publish_block(usb_block_t *blk) {
 static inline void packet_publish_slot(packet_slot_t *slot) {
     __dmb();
     slot->ready = 1u;
-    update_max_u32(&g_packet_queue_highwater, packet_queue_depth());
+    if (packet_queue_depth() > g_packet_queue_highwater) {
+        g_packet_queue_highwater = packet_queue_depth();
+    }
 
     uint8_t next = (uint8_t)((g_pkt_prod_idx + 1u) % PACKET_QUEUE_COUNT);
     g_pkt_prod_idx = next;
@@ -285,7 +356,7 @@ static inline void packet_release_slot(packet_slot_t *slot) {
     slot->ready = 0u;
 }
 
-static bool stream_pop_usb_byte(uint8_t *out) {
+static inline bool stream_pop_usb_byte(uint8_t *out) {
     usb_block_t *blk = &g_usb_blocks[g_usb_cons_idx];
 
     if (!blk->ready) {
@@ -351,21 +422,24 @@ static void init_system_clock(void) {
 
 static void init_gamma_and_color_luts(void) {
     for (uint32_t i = 0; i < 256; ++i) {
-        uint32_t y = i * i;
-        g_gamma_lut[i] = (uint8_t)((y + 255u) / 255u);
+        g_gamma_lut[i] = gamma8((uint8_t)i);
     }
 
     for (uint32_t i = 0; i < 32; ++i) {
-        uint8_t v8 = (uint8_t)((i << 3) | (i >> 2));
+        uint8_t v8 = expand5((uint8_t)i);
         g_r5_to_cd[i] = (uint8_t)(g_gamma_lut[v8] >> (8 - COLOR_DEPTH));
         g_b5_to_cd[i] = (uint8_t)(g_gamma_lut[v8] >> (8 - COLOR_DEPTH));
     }
 
     for (uint32_t i = 0; i < 64; ++i) {
-        uint8_t v8 = (uint8_t)((i << 2) | (i >> 4));
+        uint8_t v8 = expand6((uint8_t)i);
         g_g6_to_cd[i] = (uint8_t)(g_gamma_lut[v8] >> (8 - COLOR_DEPTH));
     }
 }
+
+/* ------------------------------------------------------------------------ */
+/*  HUB75 GPIO / PIO / DMA  (timing-critical, all in SRAM)                 */
+/* ------------------------------------------------------------------------ */
 
 void __not_in_flash_func(set_row_address)(uint32_t row) {
     sio_hw->gpio_clr = ADDR_MASK;
@@ -376,13 +450,14 @@ void __not_in_flash_func(set_row_address)(uint32_t row) {
     sio_hw->gpio_set = bits;
 }
 
-void __not_in_flash_func(prepare_dma_buffer)(uint8_t plane_idx, uint32_t buf_idx, uint32_t row, uint32_t bit) {
-    const uint8_t *src = g_bcm_planes[plane_idx][row][bit];
-    uint32_t *dst = g_dma_buffer[buf_idx];
+/* Direct PIO register access for minimal latency */
+static inline uint32_t __not_in_flash_func(pio_sm_pc)(PIO pio, uint sm) {
+    return pio->sm[sm].addr;
+}
 
-    for (uint32_t x = 0; x < DISPLAY_WIDTH; ++x) {
-        dst[x] = src[x];
-    }
+static inline bool __not_in_flash_func(pio_sm_tx_fifo_empty_raw)(PIO pio, uint sm) {
+    /* TX FIFO level is bits [3:0] for SM0, [11:8] for SM1, etc. */
+    return (pio->flevel & (0xFu << (sm * 8u))) == 0u;
 }
 
 static void hub75_gpio_init(void) {
@@ -443,7 +518,7 @@ static bool __not_in_flash_func(wait_for_row_shift_complete)(void) {
     uint target_pc = g_pio_prog_offset + hub75_data_wrap_target;
 
     while (true) {
-        if (pio_sm_is_tx_fifo_empty(g_pio, g_sm_data) && pio_sm_get_pc(g_pio, g_sm_data) == target_pc) {
+        if (pio_sm_tx_fifo_empty_raw(g_pio, g_sm_data) && pio_sm_pc(g_pio, g_sm_data) == target_pc) {
             return true;
         }
 
@@ -468,6 +543,9 @@ static void __not_in_flash_func(recover_scan_pipeline)(void) {
     g_dma_done = true;
 }
 
+/* ------------------------------------------------------------------------ */
+/*  Display refresh – direct DMA from g_bcm_planes, no CPU copy             */
+/* ------------------------------------------------------------------------ */
 void __not_in_flash_func(hub75_refresh_once)(void) {
     uint8_t display_idx = g_display_idx;
     uint32_t buf_idx = 0;
@@ -478,20 +556,18 @@ void __not_in_flash_func(hub75_refresh_once)(void) {
         for (uint32_t row = 0; row < SCAN_ROWS; ++row) {
             sio_hw->gpio_set = OE_MASK;
 
-            prepare_dma_buffer(display_idx, buf_idx, row, bit);
-            dma_channel_set_read_addr((uint)g_dma_chan, g_dma_buffer[buf_idx], false);
+            /* Point DMA directly at the BCM row buffer (32-bit aligned) */
+            uint8_t *src = g_bcm_planes[display_idx][row][bit];
+            dma_channel_set_read_addr((uint)g_dma_chan, src, false);
             g_dma_done = false;
-            dma_channel_set_trans_count((uint)g_dma_chan, DISPLAY_WIDTH, true);
+            dma_channel_set_trans_count((uint)g_dma_chan, DISPLAY_WIDTH / 4u, true);
 
-            uint32_t next_buf = 1u - buf_idx;
+            /* Pre-compute next DMA source while current one is shifting */
             uint32_t next_row = row + 1u;
             uint32_t next_bit = bit;
             if (next_row >= SCAN_ROWS) {
                 next_row = 0;
                 next_bit = bit + 1u;
-            }
-            if (next_bit < COLOR_DEPTH) {
-                prepare_dma_buffer(display_idx, next_buf, next_row, next_bit);
             }
 
             uint32_t wait_start = time_us_32();
@@ -509,9 +585,8 @@ void __not_in_flash_func(hub75_refresh_once)(void) {
             }
 
             if (!row_transfer_ok || !wait_for_row_shift_complete()) {
-                add_atomic_u32(&g_dma_wait_timeouts, 1u);
+                core1_inc(&g_core1_dma_timeouts);
                 recover_scan_pipeline();
-                buf_idx = next_buf;
                 continue;
             }
 
@@ -526,23 +601,28 @@ void __not_in_flash_func(hub75_refresh_once)(void) {
             busy_wait_us_32(delay_us);
             sio_hw->gpio_set = OE_MASK;
 
-            buf_idx = next_buf;
+            (void)next_row;
+            (void)next_bit;
+            (void)buf_idx;
         }
     }
 
-    add_atomic_u32(&g_scan_frames, 1u);
+    core1_inc(&g_core1_scan_frames);
 
     if (g_swap_pending) {
         uint64_t now = time_us_64();
         if (now >= g_next_swap_allowed_us) {
             g_display_idx = g_pending_idx;
             g_swap_pending = false;
-            add_atomic_u32(&g_displayed_frames, 1u);
+            core1_inc(&g_core1_displayed_frames);
             g_next_swap_allowed_us = now + FRAME_UPDATE_PERIOD_US;
         }
     }
 }
 
+/* ------------------------------------------------------------------------ */
+/*  RGB565 -> BCM conversion (Core1)                                        */
+/* ------------------------------------------------------------------------ */
 void __not_in_flash_func(convert_rgb565_to_bcm)(const uint8_t *src, uint8_t plane_idx) {
     for (uint32_t row = 0; row < SCAN_ROWS; ++row) {
         uint32_t y_upper = row;
@@ -641,60 +721,58 @@ static void core1_process_one_packet(void) {
     }
 
     uint32_t packet_start_us = time_us_32();
-    if (g_core1_last_packet_us != 0u) {
-        update_max_atomic_u32(&g_core1_packet_gap_us_max, packet_start_us - g_core1_last_packet_us);
+    static uint32_t s_core1_last_packet_us = 0;
+    if (s_core1_last_packet_us != 0u) {
+        core1_update_max(&g_core1_packet_gap_us_max, packet_start_us - s_core1_last_packet_us);
     }
-    g_core1_last_packet_us = packet_start_us;
+    s_core1_last_packet_us = packet_start_us;
 
     uint16_t encoded_len = slot->len;
 
     if (encoded_len == 0u) {
-        add_atomic_u32(&g_ready_len_zero_events, 1u);
+        core1_inc(&g_core1_ready_len_zero_events);
     }
 
     if (encoded_len == 0 || encoded_len > RECV_BUFFER_SIZE) {
-        add_atomic_u32(&g_dropped_frames_core1, 1u);
-        add_atomic_u32(&g_cobs_errors_core1, 1u);
+        core1_inc(&g_core1_dropped_frames);
+        core1_inc(&g_core1_cobs_errors);
         packet_release_slot(slot);
         g_pkt_cons_idx = (uint8_t)((g_pkt_cons_idx + 1u) % PACKET_QUEUE_COUNT);
         return;
     }
 
-    uint16_t expected_checksum = g_packet_slot_checksum[g_pkt_cons_idx];
-    uint16_t actual_checksum = xor16_checksum(slot->data, encoded_len);
-    if (expected_checksum != actual_checksum) {
-        add_atomic_u32(&g_slot_corruption_events, 1u);
-    }
-
     uint32_t t_decode = time_us_32();
     size_t decoded_len = cobs_decode(slot->data, encoded_len, g_decode_buf, FRAME_SIZE_RGB565);
     uint32_t decode_us = (uint32_t)(time_us_32() - t_decode);
-    update_max_atomic_u32(&g_decode_us_max, decode_us);
+    core1_update_max(&g_core1_decode_us_max, decode_us);
 
     packet_release_slot(slot);
     g_pkt_cons_idx = (uint8_t)((g_pkt_cons_idx + 1u) % PACKET_QUEUE_COUNT);
 
     if (decoded_len != FRAME_SIZE_RGB565) {
-        add_atomic_u32(&g_dropped_frames_core1, 1u);
-        add_atomic_u32(&g_cobs_errors_core1, 1u);
+        core1_inc(&g_core1_dropped_frames);
+        core1_inc(&g_core1_cobs_errors);
         return;
     }
 
     if (g_swap_pending) {
-        add_atomic_u32(&g_swap_replaced_frames, 1u);
+        core1_inc(&g_core1_swap_replaced_frames);
     }
 
     uint8_t build_idx = select_build_buffer();
     uint32_t t_convert = time_us_32();
     convert_rgb565_to_bcm(g_decode_buf, build_idx);
     uint32_t convert_us = (uint32_t)(time_us_32() - t_convert);
-    update_max_atomic_u32(&g_convert_us_max, convert_us);
+    core1_update_max(&g_core1_convert_us_max, convert_us);
 
     g_pending_idx = build_idx;
     g_swap_pending = true;
-    add_atomic_u32(&g_decoded_frames, 1u);
+    core1_inc(&g_core1_decoded_frames);
 }
 
+/* ------------------------------------------------------------------------ */
+/*  Core0 USB / parsing                                                     */
+/* ------------------------------------------------------------------------ */
 static void ingest_usb_blocks(void) {
     static uint8_t trash[256];
 
@@ -788,7 +866,6 @@ static void parse_usb_stream_to_packets(void) {
                     g_queue_full_on_delim++;
                 } else {
                     slot->len = g_parser_pos;
-                    g_packet_slot_checksum[g_pkt_prod_idx] = xor16_checksum(slot->data, slot->len);
                     packet_publish_slot(slot);
                 }
             }
@@ -830,20 +907,28 @@ static void emit_stats(void) {
     }
     g_stats_last_us = now;
 
+    /* Snapshot Core1 counters (32-bit aligned volatile reads are atomic) */
+    uint32_t dec = g_core1_decoded_frames;
+    uint32_t disp = g_core1_displayed_frames;
+    uint32_t scan = g_core1_scan_frames;
+    uint32_t drop1 = g_core1_dropped_frames;
+    uint32_t cobs = g_core1_cobs_errors;
+    uint32_t dma_to = g_core1_dma_timeouts;
+    uint32_t swap_rep = g_core1_swap_replaced_frames;
+    uint32_t slot_corrupt = g_core1_slot_corruption_events;
+    uint32_t ready_len0 = g_core1_ready_len_zero_events;
+    uint32_t pkt_gap_max = g_core1_packet_gap_us_max;
+    uint32_t dec_us_max = g_core1_decode_us_max;
+    uint32_t conv_us_max = g_core1_convert_us_max;
+
+    /* Reset Core1 max counters after snapshot (best-effort) */
+    g_core1_packet_gap_us_max = 0;
+    g_core1_decode_us_max = 0;
+    g_core1_convert_us_max = 0;
+
     uint32_t rx = g_rx_total_bytes;
-    uint32_t dec = load_atomic_u32(&g_decoded_frames);
-    uint32_t disp = load_atomic_u32(&g_displayed_frames);
-    uint32_t scan = load_atomic_u32(&g_scan_frames);
-    uint32_t drop = g_dropped_frames_core0 + load_atomic_u32(&g_dropped_frames_core1);
-    uint32_t cobs = load_atomic_u32(&g_cobs_errors_core1);
+    uint32_t drop = g_dropped_frames_core0 + drop1;
     uint32_t usb_drop = g_usb_drop_bytes;
-    uint32_t dma_to = load_atomic_u32(&g_dma_wait_timeouts);
-    uint32_t swap_replaced = load_atomic_u32(&g_swap_replaced_frames);
-    uint32_t qfull_delim = g_queue_full_on_delim;
-    uint32_t qfull_mid = g_queue_full_mid_packet;
-    uint32_t usb_blk_ovr = g_usb_block_ready_overrun;
-    uint32_t slot_corrupt = load_atomic_u32(&g_slot_corruption_events);
-    uint32_t ready_len0 = load_atomic_u32(&g_ready_len_zero_events);
 
     uint32_t rx_bps = rx - g_stats_last_rx;
     uint32_t usb_drop_bps = usb_drop - g_stats_last_usb_drop;
@@ -854,9 +939,6 @@ static void emit_stats(void) {
     uint32_t dma_to_ps = dma_to - g_stats_last_dma_to;
 
     uint32_t tud_gap_us_max = g_tud_gap_us_max;
-    uint32_t decode_us_max = exchange_atomic_u32(&g_decode_us_max, 0u);
-    uint32_t convert_us_max = exchange_atomic_u32(&g_convert_us_max, 0u);
-    uint32_t pkt_gap_us_max = exchange_atomic_u32(&g_core1_packet_gap_us_max, 0u);
     uint32_t usb_hw = g_usb_block_highwater;
     uint32_t pkt_hw = g_packet_queue_highwater;
 
@@ -884,21 +966,21 @@ static void emit_stats(void) {
                          (unsigned long)scan_fps,
                          (unsigned long)drop_ps,
                          (unsigned long)drop,
-                         (unsigned long)swap_replaced,
+                         (unsigned long)swap_rep,
                          (unsigned long)g_drop_packet_overflow,
                          (unsigned long)g_drop_packet_q_overrun,
-                         (unsigned long)qfull_delim,
-                         (unsigned long)qfull_mid,
-                         (unsigned long)usb_blk_ovr,
+                         (unsigned long)g_queue_full_on_delim,
+                         (unsigned long)g_queue_full_mid_packet,
+                         (unsigned long)g_usb_block_ready_overrun,
                          (unsigned long)slot_corrupt,
                          (unsigned long)ready_len0,
                          (unsigned long)cobs,
                          (unsigned long)usb_hw,
                          (unsigned long)pkt_hw,
                          (unsigned long)tud_gap_us_max,
-                         (unsigned long)decode_us_max,
-                         (unsigned long)convert_us_max,
-                         (unsigned long)pkt_gap_us_max,
+                         (unsigned long)dec_us_max,
+                         (unsigned long)conv_us_max,
+                         (unsigned long)pkt_gap_max,
                          (unsigned long)dma_to_ps,
                          (unsigned long)dma_to);
         if (n > 0) {
@@ -911,7 +993,9 @@ static void emit_stats(void) {
 static inline void service_usb(void) {
     uint32_t now = time_us_32();
     if (g_last_tud_us != 0) {
-        update_max_u32(&g_tud_gap_us_max, (uint32_t)(now - g_last_tud_us));
+        if ((now - g_last_tud_us) > g_tud_gap_us_max) {
+            g_tud_gap_us_max = now - g_last_tud_us;
+        }
     }
     g_last_tud_us = now;
 
@@ -919,6 +1003,9 @@ static inline void service_usb(void) {
     ingest_usb_blocks();
 }
 
+/* ------------------------------------------------------------------------ */
+/*  Core1 entry                                                             */
+/* ------------------------------------------------------------------------ */
 static void core1_entry(void) {
     hub75_gpio_init();
     hub75_pio_init();
@@ -936,16 +1023,16 @@ static void core1_entry(void) {
     }
 }
 
+/* ------------------------------------------------------------------------ */
+/*  Main (Core0)                                                            */
+/* ------------------------------------------------------------------------ */
 int main(void) {
     init_system_clock();
 
     memset(g_bcm_planes, 0, sizeof(g_bcm_planes));
-    memset(g_dma_buffer, 0, sizeof(g_dma_buffer));
     memset(g_usb_blocks, 0, sizeof(g_usb_blocks));
     memset(g_packet_slots, 0, sizeof(g_packet_slots));
     memset(g_decode_buf, 0, sizeof(g_decode_buf));
-
-    critical_section_init(&g_stats_lock);
 
     init_gamma_and_color_luts();
 
