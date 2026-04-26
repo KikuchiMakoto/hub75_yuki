@@ -2,6 +2,9 @@ name: Release Firmware
 
 on:
   push:
+    branches:
+      - main
+      - master
     tags:
       - 'firmware-*'
   workflow_dispatch:
