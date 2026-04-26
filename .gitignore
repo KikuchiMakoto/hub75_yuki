@@ -62,3 +62,14 @@ docs/
 # Bun
 *.bun
 .bun/
+
+# KiCad
+kicad_pcb/.history/
+
+# PlatformIO build cache
+.pio/build/
+.pio/libdeps/
+
+# CMake build directories
+build/
+cmake-build-*/
