@@ -1,13 +1,31 @@
 import { cobsEncode } from './cobs';
 import { DISPLAY_WIDTH, DISPLAY_HEIGHT } from '../types';
-import type { DeviceTransport, LEDMatrixController } from '../types';
+import type { LEDMatrixController } from '../types';
 
-export { WebUSBTransport } from './webusb';
+/**
+ * Lazy-load the web-serial-polyfill only when Web Serial API is missing.
+ * This keeps the bundle smaller for browsers that natively support it.
+ */
+let webSerialPolyfill: unknown = null;
+async function getSerialApi(): Promise<unknown> {
+  if ('serial' in navigator && navigator.serial) {
+    return navigator.serial;
+  }
+  // Fallback: web-serial-polyfill uses WebUSB to talk to CDC-ACM devices.
+  // This works on Android Chrome where OS does not bind a CDC driver.
+  if (!webSerialPolyfill) {
+    const mod = await import('web-serial-polyfill');
+    webSerialPolyfill = mod.serial;
+  }
+  return webSerialPolyfill;
+}
 
 /**
  * Web Serial API transport for HUB75 LED Matrix communication.
  *
  * Design notes:
+ * - Uses native Web Serial API when available; falls back to web-serial-polyfill
+ *   (WebUSB-based) on browsers without native support (e.g. Android Chrome).
  * - USB CDC on RP2040 ignores baud rate, but we keep the default 115200 for
  *   compatibility with physical UART bridges if they are ever used.
  * - We assert DTR after open because some CDC stacks stall TX until DTR is set.
@@ -16,8 +34,7 @@ export { WebUSBTransport } from './webusb';
  *   keeps latency minimal and avoids stale-frame pile-up.
  * - Canvas elements are reused to reduce GC pressure in animation loops.
  */
-export class WebSerialTransport implements DeviceTransport, LEDMatrixController {
-  readonly type = 'webserial' as const;
+export class WebSerialTransport implements LEDMatrixController {
   private port: SerialPort | null = null;
   private writer: WritableStreamDefaultWriter<Uint8Array> | null = null;
 
@@ -41,20 +58,15 @@ export class WebSerialTransport implements DeviceTransport, LEDMatrixController 
   private _errors = 0;
 
   async connect(): Promise<void> {
-    if (!('serial' in navigator)) {
-      throw new Error(
-        'Web Serial API is not supported in this browser. ' +
-          'Please use Chrome or Edge.'
-      );
-    }
+    const serialApi = await getSerialApi() as any;
 
     // Request a port.  Filtering by Raspberry Pi VID makes the picker friendlier.
-    const port = await navigator.serial.requestPort({
+    const port = await serialApi.requestPort({
       filters: [
         { usbVendorId: 0x2e8a }, // Raspberry Pi Foundation
         { usbVendorId: 0x2e8a, usbProductId: 0x0101 }, // HUB75 Controller v2
       ],
-    });
+    }) as any;
 
     // Open with explicit settings.  bufferSize reduces the chance of
     // browser-level back-pressure stalling animation loops.
@@ -69,8 +81,8 @@ export class WebSerialTransport implements DeviceTransport, LEDMatrixController 
 
     // Some CDC stacks (including certain TinyUSB builds) will not begin
     // sending data upstream until DTR is asserted by the host.
-    if ('setSignals' in port) {
-      await (port as any).setSignals({
+    if (typeof port.setSignals === 'function') {
+      await port.setSignals({
         dataTerminalReady: true,
         requestToSend: false,
       });
@@ -81,7 +93,7 @@ export class WebSerialTransport implements DeviceTransport, LEDMatrixController 
       throw new Error('Port opened but has no writable stream');
     }
 
-    this.port = port;
+    this.port = port as SerialPort;
     this.writer = port.writable.getWriter();
     console.log('[WebSerial] Connected');
   }

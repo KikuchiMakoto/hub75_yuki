@@ -13,7 +13,8 @@
     "@ffmpeg/util": "^0.12.2",
     "@tailwindcss/postcss": "^4.1.18",
     "react": "^19.2.3",
-    "react-dom": "^19.2.3"
+    "react-dom": "^19.2.3",
+    "web-serial-polyfill": "^1.0.15"
   },
   "devDependencies": {
     "@types/bun": "latest",
