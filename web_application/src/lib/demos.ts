@@ -35,9 +35,9 @@ function hsvToRgb(h: number, s: number, v: number): [number, number, number] {
   const t = v * (1 - (1 - f) * s);
 
   const mod = i % 6;
-  const r = [v, q, p, p, t, v][mod];
-  const g = [t, v, v, q, p, p][mod];
-  const b = [p, p, t, v, v, q][mod];
+  const r = [v, q, p, p, t, v][mod]!;
+  const g = [t, v, v, q, p, p][mod]!;
+  const b = [p, p, t, v, v, q][mod]!;
 
   return [Math.round(r * 255), Math.round(g * 255), Math.round(b * 255)];
 }
@@ -115,13 +115,14 @@ function demoFire(ctx: CanvasRenderingContext2D, t: number): ImageData {
   if (!fireBuffer) {
     fireBuffer = new Float32Array((DISPLAY_HEIGHT + 2) * DISPLAY_WIDTH);
   }
+  const buf = fireBuffer!;
 
   const imageData = ctx.createImageData(DISPLAY_WIDTH, DISPLAY_HEIGHT);
   const data = imageData.data;
 
   // Generate heat at bottom
   for (let x = 0; x < DISPLAY_WIDTH; x++) {
-    fireBuffer[(DISPLAY_HEIGHT + 1) * DISPLAY_WIDTH + x] = Math.random() * 255;
+    buf[(DISPLAY_HEIGHT + 1) * DISPLAY_WIDTH + x] = Math.random() * 255;
   }
 
   // Propagate fire upward
@@ -132,20 +133,20 @@ function demoFire(ctx: CanvasRenderingContext2D, t: number): ImageData {
       const x2 = Math.min(DISPLAY_WIDTH - 1, x + 1);
 
       const avg =
-        (fireBuffer[y * DISPLAY_WIDTH + x1] +
-          fireBuffer[y * DISPLAY_WIDTH + x] +
-          fireBuffer[y * DISPLAY_WIDTH + x2] +
-          fireBuffer[(y + 1) * DISPLAY_WIDTH + x]) /
+        (buf[y * DISPLAY_WIDTH + x1]! +
+          buf[y * DISPLAY_WIDTH + x]! +
+          buf[y * DISPLAY_WIDTH + x2]! +
+          buf[(y + 1) * DISPLAY_WIDTH + x]!) /
         4.0;
 
-      fireBuffer[(y - 1) * DISPLAY_WIDTH + x] = Math.max(0, avg - decay);
+      buf[(y - 1) * DISPLAY_WIDTH + x] = Math.max(0, avg - decay);
     }
   }
 
   // Convert to RGB
   for (let y = 0; y < DISPLAY_HEIGHT; y++) {
     for (let x = 0; x < DISPLAY_WIDTH; x++) {
-      const v = Math.floor(fireBuffer[y * DISPLAY_WIDTH + x]);
+      const v = Math.floor(buf[y * DISPLAY_WIDTH + x]!);
       let r = 0, g = 0, b = 0;
 
       if (v < 85) {
@@ -182,6 +183,8 @@ function demoMatrix(ctx: CanvasRenderingContext2D, t: number): ImageData {
       Math.random() * 2 + 1
     );
   }
+  const drops = matrixDrops!;
+  const speeds = matrixSpeeds!;
 
   const imageData = ctx.createImageData(DISPLAY_WIDTH, DISPLAY_HEIGHT);
   const data = imageData.data;
@@ -189,10 +192,10 @@ function demoMatrix(ctx: CanvasRenderingContext2D, t: number): ImageData {
   // Clear to black
   data.fill(0);
 
-  for (let i = 0; i < matrixDrops.length; i++) {
+  for (let i = 0; i < drops.length; i++) {
     const x = i * 2;
-    const dropY = matrixDrops[i];
-    const speed = matrixSpeeds[i];
+    const dropY = drops[i]!;
+    const speed = speeds[i]!;
 
     // Draw trail
     for (let j = 0; j < Math.min(10, DISPLAY_HEIGHT); j++) {
@@ -208,10 +211,10 @@ function demoMatrix(ctx: CanvasRenderingContext2D, t: number): ImageData {
     }
 
     // Update position
-    matrixDrops[i] = dropY + speed * 0.5;
-    if (matrixDrops[i] > DISPLAY_HEIGHT + 10) {
-      matrixDrops[i] = Math.random() * -10;
-      matrixSpeeds[i] = Math.random() * 2 + 1;
+    drops[i] = dropY + speed * 0.5;
+    if (drops[i]! > DISPLAY_HEIGHT + 10) {
+      drops[i] = Math.random() * -10;
+      speeds[i] = Math.random() * 2 + 1;
     }
   }
 

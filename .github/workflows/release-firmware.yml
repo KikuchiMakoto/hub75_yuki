@@ -44,12 +44,17 @@ jobs:
           path: |
             ~/.platformio
             ~/.cache/pip
-          key: platformio-${{ runner.os }}-${{ hashFiles('**/platformio.ini') }}
+          key: platformio-${{ matrix.name }}-${{ runner.os }}-${{ hashFiles(format('{0}/platformio.ini', matrix.dir)) }}
 
       - name: Install PlatformIO
         run: |
           pip install --upgrade platformio
           pio --version
+
+      - name: Clean build directory
+        working-directory: ./${{ matrix.dir }}
+        run: |
+          rm -rf .pio/build
 
       - name: Build ${{ matrix.name }}
         working-directory: ./${{ matrix.dir }}

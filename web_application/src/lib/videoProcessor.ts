@@ -74,7 +74,7 @@ export class VideoProcessor {
     await this.ffmpeg.deleteFile('output.mp4');
 
     // Convert to Blob
-    return new Blob([data], { type: 'video/mp4' });
+    return new Blob([data as BlobPart], { type: 'video/mp4' });
   }
 
   /**

@@ -76,9 +76,9 @@ export class SerialDevice {
     for (let y = 0; y < height; y++) {
       for (let x = 0; x < width; x++) {
         const i = (y * width + x) * 4;
-        const r = data[i] >> 3;     // 8-bit to 5-bit
-        const g = data[i + 1] >> 2; // 8-bit to 6-bit
-        const b = data[i + 2] >> 3; // 8-bit to 5-bit
+        const r = data[i]! >> 3;     // 8-bit to 5-bit
+        const g = data[i + 1]! >> 2; // 8-bit to 6-bit
+        const b = data[i + 2]! >> 3; // 8-bit to 5-bit
 
         const rgb565Value = (r << 11) | (g << 5) | b;
 
