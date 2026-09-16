@@ -4,30 +4,21 @@
 
 ## プロジェクト構成
 
-このプロジェクトは、**Application (Python)**、**Application (Web)**、**Firmware**、**KiCad PCB** の4つのコンポーネントで構成されています：
+このプロジェクトは、**Application (Python)**、**Firmware**、**KiCad PCB** の3つのコンポーネントで構成されています：
 
 ```
-├── application_py/     # Python制御アプリケーション (PC側)
+├── application/       # Python制御アプリケーション (PC側)
 │   └── src/           # LED Matrix Controller (画像/動画/カメラ/テキスト表示)
-├── application_web/   # Webアプリケーション (ブラウザ側)
-│   └── src/           # React + TypeScript (Web Serial API対応)
-├── firmware/          # RP2040ファームウェア (Arduino core、安定動作)
+├── firmware/          # RP2040ファームウェア (Arduino core + PIO、COBSバイナリ通信)
 │   └── src/           # HUB75ドライバ (PlatformIO/Arduino)
-├── firmware_v2/       # RP2040ファームウェア (pico-sdk + TinyUSB、WIPだが動作可能性高)
-│   └── src/
-├── firmware_v3/       # RP2040ファームウェア (pico-sdk + TinyUSB、WIPだが動作可能性高)
-│   └── src/
 └── kicad_pcb/         # KiCad設計データ (基板レイアウト/ライブラリ)
 ```
 
 ### 役割分担
 
-- **Firmware** (`firmware/`): RP2040上で動作するC++コード。HUB75パネルの駆動、PIO/DMAによる高速出力、USB CDCによるCOBSデータ受信、RGB565からBCM変換を担当。現在もっとも安定した実装
-- **Firmware v2** (`firmware_v2/`): pico-sdk + TinyUSBベース。最適化されたLED表示fps向上機能改善版
-- **Firmware v3** (`firmware_v3/`): pico-sdk + TinyUSBベース。9bit native BCM高画質版
-- **Application (Python)** (`application_py/`): PC上で動作するPythonコード。画像/動画読み込み、リサイズ、RGB565変換、COBSエンコード、シリアル通信を担当
-- **Application (Web)** (`application_web/`): ブラウザで動作するWebアプリケーション。Web Serial APIを使用してUSB経由で制御
-- **KiCad PCB** (`kicad_pcb/`): 回路図シンボル/フットプリント/基板レイアウトなどのハードウェア設計データを管理
+- **Firmware** (`firmware/`): RP2040上で動作するC++コード。HUB75パネルの駆動、PIO/DMAによる高速出力、USB CDCによるCOBSデータ受信、RGB565からBCM変換を担当。
+- **Application (Python)** (`application/`): PC上で動作するPythonコード。画像/動画読み込み、リサイズ、RGB565変換、COBSエンコード、シリアル通信を担当。
+- **KiCad PCB** (`kicad_pcb/`): 回路図シンボル/フットプリント/基板レイアウトなどのハードウェア設計データを管理。
 
 ### 通信プロトコル（絶対的ルール）
 
@@ -37,7 +28,18 @@
 - **ペイロード形式**: RGB565 リトルエンディアン
 - **エンコーディング**: COBS (Consistent Overhead Byte Stuffing)
 - **フレーム区切り**: 末尾 `0x00`
-- **解像度**: **128 × 32**（デフォルト。変更する場合はファームウェアとクライアント双方を同期すること）
+- **総画素数 / ペイロード長**: **4,096 画素（8,192 バイト）**
+
+### 動作モードとパネル配置（64x32 パネル 2枚構成）
+
+本システムは、64x32 HUB75 パネル 2枚の物理配置と用途に応じて、以下の **2つの公式動作モード** を備えています：
+
+1. **NormalMode (128x32)**:
+   - **配置**: 64×32 パネルを左右に連結（横長バナー配置 / デフォルト）
+   - **動作**: PC 上の Python コントローラー（`application/`）から USB CDC 経由で COBS 符号化 RGB565 フレームを受信し、Core1 が高速リフレッシュ駆動。動画、画像、テキスト、時計、デモアニメーションの再生に対応。
+2. **StandaloneMode (64x64)**:
+   - **配置**: 64×32 パネルを上下に積層（正方形 64×64 配置。下段の2枚目パネルはリボン配線に合わせて **180度回転マッピング** されます）
+   - **動作**: PC 不要の完全スタンドアローン動作。RP2040 Core0（250MHz）が ADXL335 加速度センサ（`GP26` X / `GP27` Y）を読み取り、純粋な `float` (f32) 2D-DEM 珪砂シミュレーション（Spatial Grid 近傍探索 $O(N)$ により 30+ FPS）をリアルタイム計算。Core1 が 64×64 パネルを駆動する「電子珪砂時計 / 回転ドラム」モード。起動時の突入電流を抑える省電力ブート（即時ブラックアウト）を搭載。
 
 > **更新レート（FPS）について**: これは**緩いルール**です。目標FPSはファームウェアの実装・最適化状況次第で変化します。クライアント側はできる限りのレートで送信し、ファームウェア側が受信・描画可能なタイミングで処理します。プロトコル形式（RGB565+COBS+0x00）を守ることが最優先です。
 
@@ -84,39 +86,38 @@ powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | ie
 
 アプリケーションを実行:
 ```bash
-cd application_py
+cd application
 
 # デモアニメーション
 uv run led-matrix --demo rainbow
 
 # 画像表示
-uv run led-matrix --image photo.jpg
+uv run led-matrix --image sample.png
+
+# 2D-DEM 珪砂シミュレーション (Taichi GPU, f32)
+uv run led-matrix --dem
+
+# 2D-DEM 64x64 Pixel/Voxel マトリクス表示
+uv run led-matrix --dem-matrix
 
 # ヘルプ表示
 uv run led-matrix --help
 ```
 
-#### 3. Application (Web) を使用 (ブラウザ側)
-
-Web Serial APIを使用してブラウザから直接制御することもできます：
-
-```bash
-cd application_web
-bun install
-bun run dev
-```
-
-ブラウザで `http://localhost:5173` を開き、画像・動画のドラッグアンドドロップやデモアニメーションを実行できます。
-
 詳細は各ディレクトリのREADMEを参照してください:
-- [Application (Python) README](application_py/README.md)
-- [Application (Web) README](application_web/README.md)
+- [Application (Python) README](application/README.md)
 - [Firmware README](firmware/README.md)
 - [KiCad PCB データ](kicad_pcb/)
 
 ## ハードウェア要件
 
 - Raspberry Pi Pico (RP2040)
-- HUB75 LED パネル 64x32 x 2枚 (合計128x32)
+- HUB75 LED パネル 64x32 x 2枚
+- 3軸加速度センサ ADXL335 (3.3V電源)
+  - **X軸**: `GP26` (ADC0)
+  - **Y軸**: `GP27` (ADC1)
+  - **Z軸**: 未使用（2D DEMのため不要）
+  - **VCC**: `3V3` (3.3V)
+  - **GND**: `GND`
 - USBケーブル
 - 5V電源 (LEDパネル用)

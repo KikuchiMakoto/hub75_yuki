@@ -14,13 +14,14 @@
 // ============================================
 #define DISPLAY_WIDTH   128
 
-// Display height: 32 or 64 (configurable via build flags)
-// Use -D DISPLAY_HEIGHT=64 in platformio.ini for 128x64 panels
+// Display height: 32 or 64
 #ifndef DISPLAY_HEIGHT
 #define DISPLAY_HEIGHT  32
 #endif
 
-#define SCAN_ROWS       (DISPLAY_HEIGHT / 2)  // 16 for 32-row, 32 for 64-row
+// Two chained 64x32 panels (1/16 scan: A, B, C, D lines)
+// Both NormalMode (128x32) and StandaloneMode (64x64) have 16 scan rows
+#define SCAN_ROWS       16
 
 // Color depth for BCM (Binary Code Modulation)
 #define COLOR_DEPTH     6   // 6-bit = 64 levels per color

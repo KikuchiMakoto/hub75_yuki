@@ -69,8 +69,8 @@ static inline void hub75_data_program_init(PIO pio, uint sm, uint offset,
     // Set side-set pin (clock)
     sm_config_set_sideset_pins(&c, clock_pin);
     
-    // Shift right, autopull at 6 bits
-    sm_config_set_out_shift(&c, true, true, 6);
+    // Shift right, no autopull (program uses explicit 'pull block')
+    sm_config_set_out_shift(&c, true, false, 32);
     
     // Join FIFO for TX only
     sm_config_set_fifo_join(&c, PIO_FIFO_JOIN_TX);

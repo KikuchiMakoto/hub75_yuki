@@ -20,6 +20,8 @@
 #include <Arduino.h>
 #include <hardware/gpio.h>
 #include <hardware/structs/sio.h>
+#include <hardware/vreg.h>
+#include <hardware/clocks.h>
 
 // Default to PIO mode if not specified
 #ifndef HUB75_USE_PIO
@@ -36,6 +38,7 @@
 #include <Adafruit_TinyUSB.h>
 #endif
 #include "hub75_config.h"
+#include "standalone_dem.h"
 
 // GPIO masks for fast register access
 #define RGB_MASK    ((1 << PIN_R0) | (1 << PIN_G0) | (1 << PIN_B0) | \
@@ -67,7 +70,12 @@ size_t cobs_decode(const uint8_t* input, size_t len, uint8_t* output, size_t max
         }
 
         // Copy (code - 1) bytes
-        for (uint8_t i = 1; i < code && read_idx < len; i++) {
+        uint8_t copy_len = code - 1;
+        if (read_idx + copy_len > len) {
+            return 0;  // Truncated packet
+        }
+
+        for (uint8_t i = 0; i < copy_len; i++) {
             // Bounds check
             if (write_idx >= max_output) {
                 return 0;  // Buffer overflow
@@ -164,6 +172,59 @@ void convert_to_bcm(uint16_t* pixels) {
             b1 >>= (8 - COLOR_DEPTH);
 
             // Pack into bit planes
+            for (int bit = 0; bit < COLOR_DEPTH; bit++) {
+                uint8_t mask = 1 << bit;
+                uint8_t packed = 0;
+                if (r0 & mask) packed |= 0x01;
+                if (g0 & mask) packed |= 0x02;
+                if (b0 & mask) packed |= 0x04;
+                if (r1 & mask) packed |= 0x08;
+                if (g1 & mask) packed |= 0x10;
+                if (b1 & mask) packed |= 0x20;
+                bcm_planes[row][bit][x] = packed;
+            }
+        }
+    }
+}
+
+// ============================================
+// Convert 64x64 DEM frame to BCM planes (Two chained 64x32 panels)
+// ============================================
+void convert_64x64_to_bcm(const uint16_t frame[64][64]) {
+    for (int row = 0; row < SCAN_ROWS; row++) {
+        for (int x = 0; x < DISPLAY_WIDTH; x++) {
+            uint16_t p_up, p_lo;
+            if (x < 64) {
+                // Panel 2 (Bottom Panel, Y: 32..63) - ROTATED 180 DEGREES
+                // Physical line row maps to display row (63 - row)
+                // Physical line (16 + row) maps to display row (47 - row)
+                // Shift clock index x maps to display column (63 - x)
+                int col = 63 - x;
+                p_up = frame[63 - row][col];
+                p_lo = frame[47 - row][col];
+            } else {
+                // Panel 1 (Top Panel, Y: 0..31) - NORMAL ORIENTATION (0 deg)
+                int col = x - 64;
+                p_up = frame[row][col];
+                p_lo = frame[16 + row][col];
+            }
+
+            // Extract and scale to 8-bit, then apply gamma
+            uint8_t r0 = gamma_tbl[((p_up >> 11) & 0x1F) << 3];
+            uint8_t g0 = gamma_tbl[((p_up >> 5) & 0x3F) << 2];
+            uint8_t b0 = gamma_tbl[(p_up & 0x1F) << 3];
+
+            uint8_t r1 = gamma_tbl[((p_lo >> 11) & 0x1F) << 3];
+            uint8_t g1 = gamma_tbl[((p_lo >> 5) & 0x3F) << 2];
+            uint8_t b1 = gamma_tbl[(p_lo & 0x1F) << 3];
+
+            r0 >>= (8 - COLOR_DEPTH);
+            g0 >>= (8 - COLOR_DEPTH);
+            b0 >>= (8 - COLOR_DEPTH);
+            r1 >>= (8 - COLOR_DEPTH);
+            g1 >>= (8 - COLOR_DEPTH);
+            b1 >>= (8 - COLOR_DEPTH);
+
             for (int bit = 0; bit < COLOR_DEPTH; bit++) {
                 uint8_t mask = 1 << bit;
                 uint8_t packed = 0;
@@ -437,22 +498,11 @@ void __not_in_flash_func(display_solid_color)(uint8_t color_mask, int duration_m
 }
 
 // ============================================
-// Boot Screen: RGB color animation (max brightness)
+// Boot Screen: Low-power safe start (zero inrush current)
 // ============================================
 void show_boot_screen() {
-    // Show solid RED (R0=1, R1=8 -> 0x09)
-    display_solid_color(0x09, 500);
-
-    // Show solid GREEN (G0=2, G1=16 -> 0x12)
-    display_solid_color(0x12, 500);
-
-    // Show solid BLUE (B0=4, B1=32 -> 0x24)
-    display_solid_color(0x24, 500);
-
-    // Show WHITE briefly (all colors on -> 0x3F)
-    display_solid_color(0x3F, 300);
-
-    // Clear display after boot
+    // Disable output to prevent brownouts / power supply overcurrent
+    sio_hw->gpio_set = OE_MASK;
     memset(bcm_planes, 0, sizeof(bcm_planes));
 }
 
@@ -483,49 +533,62 @@ void loop1() {
 }
 
 // ============================================
-// Core0: USB CDC Reception + BCM Conversion
+// Core0: Standalone DEM Simulation + USB CDC Receiver
 // ============================================
-void setup() {
-    Serial.begin(115200);  // Baud ignored for USB CDC
+static uint16_t standalone_frame[64][64];
+static uint32_t last_usb_frame_time = 0;
 
+void setup() {
+    // 1. Stable Overclock to 250 MHz (raise VREG to 1.20V first)
+    vreg_set_voltage(VREG_VOLTAGE_1_20);
+    delay(10);
+    set_sys_clock_khz(250000, true);
+
+    Serial.begin(115200);  // Baud ignored for USB CDC
     memset(recv_buffer, 0, sizeof(recv_buffer));
 
-    delay(500);  // Wait for USB
+    // 2. Initialize Standalone 2D-DEM & ADXL335 (GP26 X, GP27 Y)
+    dem_init();
+
+    delay(200);
 }
 
 void loop() {
-    // Simplified frame reception (Reference: LED_Matrix_firmware_K00798)
-    // Process serial data and update display immediately when frame is complete
+    // 1. Check for incoming USB CDC serial frames from PC
     while (Serial.available()) {
         uint8_t c = Serial.read();
 
         if (c == 0x00) {
             // Packet delimiter received - decode COBS packet
             if (recv_pos > 0) {
-                // Decode COBS into temporary buffer
                 size_t decoded_len = cobs_decode(recv_buffer, recv_pos,
                                                  decode_buffer, FRAME_SIZE_RGB565);
-
-                // Verify size matches expected frame size
                 if (decoded_len == FRAME_SIZE_RGB565) {
-                    // Valid frame - copy directly and convert immediately
-                    // This approach is simpler and more stable for video playback
                     memcpy(frame_buffer, decode_buffer, FRAME_SIZE_RGB565);
-                    convert_to_bcm(frame_buffer);
+                    convert_64x64_to_bcm((const uint16_t (*)[64])frame_buffer);
+                    last_usb_frame_time = millis();
                 }
-                // Invalid packets are silently discarded
             }
-            // Reset for next packet
             recv_pos = 0;
-
         } else {
-            // Accumulate COBS-encoded data
             if (recv_pos < RECV_BUFFER_SIZE) {
                 recv_buffer[recv_pos++] = c;
             } else {
-                // Buffer overflow - discard packet and reset
                 recv_pos = 0;
             }
         }
+    }
+
+    // 2. Standalone Mode: if no USB serial frame received in last 500 ms,
+    // execute real-time Q16.16 DEM physics simulation with ADXL335!
+    if (millis() - last_usb_frame_time > 500) {
+        // Step DEM simulation (reads GP26 X & GP27 Y, advances Q16.16 physics)
+        dem_step();
+
+        // Render to 64x64 frame buffer with Turbo colormap and 3x3 hole-fill filter
+        dem_render(standalone_frame);
+
+        // Convert 64x64 buffer to BCM planes for Core1 HUB75 driving
+        convert_64x64_to_bcm(standalone_frame);
     }
 }
