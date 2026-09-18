@@ -36,7 +36,9 @@ static inline int32_t __not_in_flash_func(q16_mul)(int32_t a, int32_t b) {
 
 static inline int32_t __not_in_flash_func(q16_div)(int32_t a, int32_t b) {
     if (b == 0) return (a >= 0) ? 0x7FFFFFFF : (int32_t)0x80000001;
-    return (int32_t)((((int64_t)a) << Q16_SHIFT) / b);
+    hw_divider_divmod_s32_start(a << 14, b);
+    hw_divider_pause();
+    return ((int32_t)sio_hw->div_quotient) << 2;
 }
 
 // Bitwise Integer Square Root for Q16.16 (16-step non-restoring, branchless inner)
@@ -289,9 +291,15 @@ static void __not_in_flash_func(dem_substep)(int32_t gx, int32_t gy) {
                         ndir_y = (((i ^ (j * 3)) & 1) ? Q16_ONE : -Q16_ONE);
                     } else {
                         overlap = DEM_PARTICLE_DIAM - dist;
-                        // Exact unit normal (two 64-bit divs: the only wide ops left)
-                        ndir_x = q16_div(diff_x, dist);
-                        ndir_y = q16_div(diff_y, dist);
+                        // Fast asynchronous hardware 32-bit divide (8-cycle hardware pipelining)
+                        hw_divider_divmod_s32_start(diff_x << 14, dist);
+                        int32_t num_y = diff_y << 14;
+                        hw_divider_pause();
+                        ndir_x = ((int32_t)sio_hw->div_quotient) << 2;
+
+                        hw_divider_divmod_s32_start(num_y, dist);
+                        hw_divider_pause();
+                        ndir_y = ((int32_t)sio_hw->div_quotient) << 2;
                     }
 
                     // A. Hooke spring (exact integer) + closing dashpot (exact integer).
@@ -308,10 +316,10 @@ static void __not_in_flash_func(dem_substep)(int32_t gx, int32_t gy) {
                     if (fn < 0) fn = 0;
                     else if (fn > DEM_FN_MAX) fn = DEM_FN_MAX;
 
-                    // B. Tangential viscous slip + Coulomb cap (0.35 = 7/20 exact)
+                    // B. Tangential viscous slip + Coulomb cap (0.35 * fn using 1-cycle hardware multiply)
                     int32_t vt_x = vrel_x - ((vn >> 8) * (ndir_x >> 8));
                     int32_t vt_y = vrel_y - ((vn >> 8) * (ndir_y >> 8));
-                    int32_t ft_max = (fn * DEM_FRIC_NUM) / DEM_FRIC_DEN;
+                    int32_t ft_max = (int32_t)(((int64_t)fn * 22938) >> 16);
                     int32_t ft_x = -DEM_GAMMA_INT * vt_x;
                     int32_t ft_y = -DEM_GAMMA_INT * vt_y;
                     if (ft_x > ft_max) ft_x = ft_max;
@@ -512,12 +520,23 @@ static void __not_in_flash_func(dem_step)(void) {
     }
 }
 
+// Snapshot buffers for concurrent Core1 rendering (zero tearing)
+static int32_t dem_snap_x[DEM_N];
+static int32_t dem_snap_y[DEM_N];
+static int32_t dem_snap_force[DEM_N];
+
+static inline void __not_in_flash_func(dem_snapshot)() {
+    memcpy(dem_snap_x, dem_pos_x, sizeof(dem_pos_x));
+    memcpy(dem_snap_y, dem_pos_y, sizeof(dem_pos_y));
+    memcpy(dem_snap_force, dem_contact_force, sizeof(dem_contact_force));
+}
+
 static void __not_in_flash_func(dem_render)(uint16_t buf[64][64]) {
     memset(buf, 0, 64 * 64 * sizeof(uint16_t));
 
     for (int i = 0; i < DEM_N; i++) {
-        int x = Q16_TO_INT(dem_pos_x[i]);
-        int y = Q16_TO_INT(dem_pos_y[i]);
+        int x = Q16_TO_INT(dem_snap_x[i]);
+        int y = Q16_TO_INT(dem_snap_y[i]);
 
         if (x >= 0 && x < 64 && y >= 0 && y < 64) {
             // Settled-pile contact (Q16) spans ~20M..860M (measured, 40:1 range),
@@ -525,7 +544,7 @@ static void __not_in_flash_func(dem_render)(uint16_t buf[64][64]) {
             // Compress with sqrt like Taichi's u^0.65: q16_sqrt(contact) = sqrt*256,
             // idx = 24 + (s - 700k)/30k maps [20M..860M] -> [38..250].
             // Cost ~70c/particle, once per frame (not per substep).
-            int32_t s = q16_sqrt(dem_contact_force[i]);
+            int32_t s = q16_sqrt(dem_snap_force[i]);
             int32_t stress = 24 + (s - 700000) / 30000;
             if (stress > 255) stress = 255;
             else if (stress < 0) stress = 0;
@@ -535,8 +554,8 @@ static void __not_in_flash_func(dem_render)(uint16_t buf[64][64]) {
 
             // Over-estimate coverage: Fill 2x2 footprint based on subpixel position
             // to completely eliminate black hole artifacts in 2x2 particle clusters.
-            int nx = x + (((dem_pos_x[i] & 0xFFFF) >= 0x8000) ? 1 : -1);
-            int ny = y + (((dem_pos_y[i] & 0xFFFF) >= 0x8000) ? 1 : -1);
+            int nx = x + (((dem_snap_x[i] & 0xFFFF) >= 0x8000) ? 1 : -1);
+            int ny = y + (((dem_snap_y[i] & 0xFFFF) >= 0x8000) ? 1 : -1);
 
             if (nx >= 0 && nx < 64) buf[y][nx] = col;
             if (ny >= 0 && ny < 64) buf[ny][x] = col;

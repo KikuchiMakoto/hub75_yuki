@@ -103,6 +103,8 @@ size_t cobs_decode(const uint8_t* input, size_t len, uint8_t* output, size_t max
 // (Reference: LED_Matrix_firmware_K00798)
 static uint16_t frame_buffer[DISPLAY_WIDTH * DISPLAY_HEIGHT];
 static volatile bool frame_ready = false;
+static volatile bool dem_frame_ready = false;
+static uint16_t standalone_frame[64][64];
 
 // BCM bit planes: [row][bit][x] = packed 6-bit RGB
 static uint8_t bcm_planes[SCAN_ROWS][COLOR_DEPTH][DISPLAY_WIDTH];
@@ -543,15 +545,28 @@ void setup1() {
 }
 
 void loop1() {
-    // Core1: Display refresh ONLY - no other operations
-    // Frame check and BCM conversion moved to Core0 to prevent display flickering
+    // 1. Primary duty: Refresh HUB75 matrix display
     hub75_refresh();
+
+    // 2. Core1 Offloaded Pipeline: Handles BCM conversion & rendering outside Core0.
+    // Maximizes throughput for both USB marquee display and standalone DEM.
+    if (frame_ready) {
+        frame_ready = false;
+#if DISPLAY_HEIGHT == 64
+        convert_64x64_to_bcm((const uint16_t (*)[64])frame_buffer);
+#else
+        convert_to_bcm(frame_buffer);
+#endif
+    } else if (dem_frame_ready) {
+        dem_frame_ready = false;
+        dem_render(standalone_frame);
+        convert_64x64_to_bcm(standalone_frame);
+    }
 }
 
 // ============================================
 // Core0: Standalone DEM Simulation + USB CDC Receiver
 // ============================================
-static uint16_t standalone_frame[64][64];
 static uint32_t last_usb_frame_time = 0;
 
 void setup() {
@@ -582,11 +597,7 @@ void loop() {
                                                  decode_buffer, FRAME_SIZE_RGB565);
                 if (decoded_len == FRAME_SIZE_RGB565) {
                     memcpy(frame_buffer, decode_buffer, FRAME_SIZE_RGB565);
-#if DISPLAY_HEIGHT == 64
-                    convert_64x64_to_bcm((const uint16_t (*)[64])frame_buffer);
-#else
-                    convert_to_bcm(frame_buffer);
-#endif
+                    frame_ready = true;
                     last_usb_frame_time = millis();
                 }
             }
@@ -609,18 +620,14 @@ void loop() {
 
         uint32_t t_start = time_us_32();
 
-        // Step DEM simulation (reads GP26 X & GP27 Y, advances physics)
+        // Step DEM simulation (Core0 100% dedicated to physics!)
         dem_step();
 
+        // Capture atomic snapshot for Core1 concurrent rendering (zero tearing)
+        dem_snapshot();
+        dem_frame_ready = true;
+
         uint32_t t_step = time_us_32();
-
-        // Render to 64x64 frame buffer with Turbo colormap and 3x3 hole-fill filter
-        dem_render(standalone_frame);
-
-        // Convert 64x64 buffer to BCM planes for Core1 HUB75 driving
-        convert_64x64_to_bcm(standalone_frame);
-
-        uint32_t t_end = time_us_32();
 
         s_frame_count++;
         s_total_step_us += (t_step - t_start);
