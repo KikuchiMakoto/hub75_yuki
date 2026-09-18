@@ -77,10 +77,13 @@ class TaichiRotatingDrumDEM:
         self.colors = ti.Vector.field(4, dtype=ti.f32, shape=self.n)
 
         # Cortex-M0+ (RP2040) Q16.16 Fixed-Point Particle Physics Fields (pure 32-bit int)
+        self.use_q16_physics = False
         self.pos_q = ti.Vector.field(2, dtype=ti.i32, shape=self.n)
         self.vel_q = ti.Vector.field(2, dtype=ti.i32, shape=self.n)
         self.force_q = ti.Vector.field(2, dtype=ti.i32, shape=self.n)
         self.contact_q = ti.field(dtype=ti.i32, shape=self.n)
+        self.grid_head_q = ti.field(dtype=ti.i32, shape=1024)
+        self.grid_next_q = ti.field(dtype=ti.i32, shape=self.n)
 
         # 4 clean box walls (8 line vertices, pure flat square without hinges)
         self.wall_lines = ti.Vector.field(2, dtype=ti.f32, shape=8)
@@ -367,6 +370,254 @@ class TaichiRotatingDrumDEM:
                 [ti.i32(self.pos[i].x * 65536.0), ti.i32(self.pos[i].y * 65536.0)]
             )
 
+
+    @ti.func
+    def _q16_sqrt(self, val: ti.i32) -> ti.i32:
+        res = ti.i32(0)
+        one = ti.i32(1 << 30)
+        x = val
+        while one > x:
+            one >>= 2
+        while one != 0:
+            if x >= res + one:
+                x -= res + one
+                res += one << 1
+            res >>= 1
+            one >>= 2
+        return res
+
+    @ti.func
+    def _q16_div(self, a: ti.i32, b: ti.i32) -> ti.i32:
+        res = ti.i32(0)
+        if b == 0:
+            res = 0x7FFFFFFF if a >= 0 else -0x7FFFFFFF
+        else:
+            # SIO hardware 32-bit divider exact match (14-bit shift)
+            res = (a << 14) // b << 2
+        return res
+
+    @ti.kernel
+    def _physics_substep_q16(self, gx: ti.i32, gy: ti.i32):
+        # 1. Reset forces & contact
+        for i in range(self.n):
+            self.force_q[i] = ti.Vector([gx, gy])
+            self.contact_q[i] = 0
+
+        # 2. Build 32x32 spatial hash grid
+        for i in range(1024):
+            self.grid_head_q[i] = -1
+        for i in range(self.n):
+            cx = self.pos_q[i][0] >> 17
+            cy = self.pos_q[i][1] >> 17
+            if cx < 0:
+                cx = 0
+            elif cx >= 32:
+                cx = 31
+            if cy < 0:
+                cy = 0
+            elif cy >= 32:
+                cy = 31
+            cell = cy * 32 + cx
+            self.grid_next_q[i] = self.grid_head_q[cell]
+            self.grid_head_q[cell] = i
+
+        # 3. Particle-Particle Contact Pairs (Exact Cortex-M0+ integer DEM)
+        DIAM = 98304
+        DIAM2 = 147456
+        KN_INT = 4000
+        DAMP_INT = 80
+        GAMMA_INT = 15
+        FN_MAX = 98304000
+
+        ti.loop_config(serialize=True)
+        for i in range(self.n):
+            px = self.pos_q[i][0]
+            py = self.pos_q[i][1]
+            vxi = self.vel_q[i][0]
+            vyi = self.vel_q[i][1]
+            fxi = self.force_q[i][0]
+            fyi = self.force_q[i][1]
+            cacc = ti.i32(0)
+
+            cx = px >> 17
+            cy = py >> 17
+            if cx < 0:
+                cx = 0
+            elif cx >= 32:
+                cx = 31
+            if cy < 0:
+                cy = 0
+            elif cy >= 32:
+                cy = 31
+
+            for dy in range(-1, 2):
+                ncy = cy + dy
+                if 0 <= ncy < 32:
+                    for dx in range(-1, 2):
+                        ncx = cx + dx
+                        if 0 <= ncx < 32:
+                            cell = ncy * 32 + ncx
+                            j = self.grid_head_q[cell]
+                            while j != -1:
+                                if j > i:
+                                    dx_ = px - self.pos_q[j][0]
+                                    dy_ = py - self.pos_q[j][1]
+                                    if -DIAM < dx_ < DIAM and -DIAM < dy_ < DIAM:
+                                        d2 = (dx_ >> 8) * (dx_ >> 8) + (dy_ >> 8) * (dy_ >> 8)
+                                        if 0 < d2 < DIAM2:
+                                            dist = self._q16_sqrt(d2)
+                                            if dist > 0:
+                                                nx = ti.i32(0)
+                                                ny = ti.i32(0)
+                                                ov = ti.i32(0)
+                                                if dist < 655:
+                                                    ov = DIAM - 655
+                                                    nx = 65536 if ((i ^ j) & 1) else -65536
+                                                    ny = 65536 if ((i ^ (j * 3)) & 1) else -65536
+                                                else:
+                                                    ov = DIAM - dist
+                                                    nx = self._q16_div(dx_, dist)
+                                                    ny = self._q16_div(dy_, dist)
+
+                                                vrx = vxi - self.vel_q[j][0]
+                                                vry = vyi - self.vel_q[j][1]
+                                                vn = (vrx >> 8) * (nx >> 8) + (vry >> 8) * (ny >> 8)
+                                                fn = KN_INT * ov
+                                                if vn < 0:
+                                                    fn -= DAMP_INT * vn
+                                                if fn < 0:
+                                                    fn = 0
+                                                elif fn > FN_MAX:
+                                                    fn = FN_MAX
+
+                                                vtx = vrx - (vn >> 8) * (nx >> 8)
+                                                vty = vry - (vn >> 8) * (ny >> 8)
+                                                ftmax = (fn * 22938) >> 16
+                                                ftx = -GAMMA_INT * vtx
+                                                fty = -GAMMA_INT * vty
+                                                if ftx > ftmax:
+                                                    ftx = ftmax
+                                                elif ftx < -ftmax:
+                                                    ftx = -ftmax
+                                                if fty > ftmax:
+                                                    fty = ftmax
+                                                elif fty < -ftmax:
+                                                    fty = -ftmax
+
+                                                cfx = (fn >> 8) * (nx >> 8) + ftx
+                                                cfy = (fn >> 8) * (ny >> 8) + fty
+                                                fxi += cfx
+                                                fyi += cfy
+                                                ti.atomic_add(self.force_q[j][0], -cfx)
+                                                ti.atomic_add(self.force_q[j][1], -cfy)
+                                                ti.atomic_add(self.contact_q[j], fn)
+                                                cacc += fn
+                                j = self.grid_next_q[j]
+
+            self.force_q[i][0] = fxi
+            self.force_q[i][1] = fyi
+            self.contact_q[i] += cacc
+
+        # 4. Box Wall Constraints
+        WMIN = 81920
+        WMAX = 4112384
+        WKN_INT = 6000
+        WDAMP_INT = 100
+        WFN_MAX = 98304000
+
+        for i in range(self.n):
+            px = self.pos_q[i][0]
+            py = self.pos_q[i][1]
+            vx = self.vel_q[i][0]
+            vy = self.vel_q[i][1]
+
+            if px < WMIN:
+                ov = WMIN - px
+                fn = WKN_INT * ov
+                if vx < 0:
+                    fn -= WDAMP_INT * vx
+                if fn < 0: fn = 0
+                elif fn > WFN_MAX: fn = WFN_MAX
+                self.force_q[i][0] += fn
+                self.contact_q[i] += fn
+            elif px > WMAX:
+                ov = px - WMAX
+                fn = WKN_INT * ov
+                if vx > 0:
+                    fn += WDAMP_INT * vx
+                if fn < 0: fn = 0
+                elif fn > WFN_MAX: fn = WFN_MAX
+                self.force_q[i][0] -= fn
+                self.contact_q[i] += fn
+
+            if py < WMIN:
+                ov = WMIN - py
+                fn = WKN_INT * ov
+                if vy < 0:
+                    fn -= WDAMP_INT * vy
+                if fn < 0: fn = 0
+                elif fn > WFN_MAX: fn = WFN_MAX
+                self.force_q[i][1] += fn
+                self.contact_q[i] += fn
+            elif py > WMAX:
+                ov = py - WMAX
+                fn = WKN_INT * ov
+                if vy > 0:
+                    fn += WDAMP_INT * vy
+                if fn < 0: fn = 0
+                elif fn > WFN_MAX: fn = WFN_MAX
+                self.force_q[i][1] -= fn
+                self.contact_q[i] += fn
+
+        # 5. Symplectic Euler Integration
+        MAX_A = 26214400
+        MAX_V = 229376
+        DT_NUM = 262
+        HMIN = 49152
+        HMAX = 4145152
+
+        for i in range(self.n):
+            ax = self.force_q[i][0]
+            ay = self.force_q[i][1]
+            if ax > MAX_A: ax = MAX_A
+            elif ax < -MAX_A: ax = -MAX_A
+            if ay > MAX_A: ay = MAX_A
+            elif ay < -MAX_A: ay = -MAX_A
+
+            self.vel_q[i][0] += ((ax >> 8) * DT_NUM) >> 8
+            self.vel_q[i][1] += ((ay >> 8) * DT_NUM) >> 8
+            self.vel_q[i][0] -= self.vel_q[i][0] >> 7
+            self.vel_q[i][1] -= self.vel_q[i][1] >> 7
+
+            if self.vel_q[i][0] > MAX_V: self.vel_q[i][0] = MAX_V
+            elif self.vel_q[i][0] < -MAX_V: self.vel_q[i][0] = -MAX_V
+            if self.vel_q[i][1] > MAX_V: self.vel_q[i][1] = MAX_V
+            elif self.vel_q[i][1] < -MAX_V: self.vel_q[i][1] = -MAX_V
+
+            self.pos_q[i][0] += (self.vel_q[i][0] * DT_NUM) >> 16
+            self.pos_q[i][1] += (self.vel_q[i][1] * DT_NUM) >> 16
+
+            if self.pos_q[i][0] < HMIN:
+                self.pos_q[i][0] = HMIN
+                if self.vel_q[i][0] < 0: self.vel_q[i][0] = -(self.vel_q[i][0] >> 2)
+            elif self.pos_q[i][0] > HMAX:
+                self.pos_q[i][0] = HMAX
+                if self.vel_q[i][0] > 0: self.vel_q[i][0] = -(self.vel_q[i][0] >> 2)
+
+            if self.pos_q[i][1] < HMIN:
+                self.pos_q[i][1] = HMIN
+                if self.vel_q[i][1] < 0: self.vel_q[i][1] = -(self.vel_q[i][1] >> 2)
+            elif self.pos_q[i][1] > HMAX:
+                self.pos_q[i][1] = HMAX
+                if self.vel_q[i][1] > 0: self.vel_q[i][1] = -(self.vel_q[i][1] >> 2)
+
+            # Synchronize back to float display fields
+            self.pos[i] = ti.Vector([
+                (ti.f32(self.pos_q[i][0]) / 4194304.0) * (2.0 * self.hl) + (0.5 - self.hl),
+                (ti.f32(self.pos_q[i][1]) / 4194304.0) * (2.0 * self.hl) + (0.5 - self.hl)
+            ])
+            self.contact_forces[i] = ti.f32(self.contact_q[i]) / 65536.0
+
     @ti.kernel
     def _update_colors_kernel(self, norm_div: ti.f32):
         """Update particle colors using accelerated Turbo colormap directly from float forces."""
@@ -395,6 +646,16 @@ class TaichiRotatingDrumDEM:
         # Dynamic Turbo normalization: scale gracefully from 1g up to 3g violent shaking
         cur_g = math.hypot(gx, gy) / self.cfg.gravity
         norm_div = 1100.0 * max(1.0, cur_g * 0.85)
+
+        if self.use_q16_physics:
+            # RP2040 Cortex-M0+ bit-exact Q16.16 integer physics simulation
+            gx_q = int(gx * 65536.0)
+            gy_q = int(gy * 65536.0)
+            for _ in range(substeps):
+                self._physics_substep_q16(gx_q, gy_q)
+            self._update_colors_kernel(norm_div)
+            self._update_wall_lines()
+            return
 
         for _ in range(substeps):
             self._physics_substep(
@@ -519,9 +780,8 @@ class TaichiRotatingDrumDEM:
         cos_t = ti.cos(theta)
         sin_t = ti.sin(theta)
         box_width = 2.0 * hl
-        r_pix = (r / box_width) * 64.0
-        # Over-estimate coverage: Fill complete 2x2 footprint to eliminate unlit gaps
-        r2_pix = r_pix * r_pix * 2.25
+        r_pix = (r / box_width) * 64.0  # 0.75 px (D = 1.5 px)
+        r2_pix = r_pix * r_pix * 1.35  # Diagonal corner coverage factor for circular bounds
 
         for i in range(self.n):
             rel_x = self.pos[i].x - 0.5
@@ -535,18 +795,20 @@ class TaichiRotatingDrumDEM:
             col = self.colors[i]
             w = self.contact_forces[i] + 10.0
 
-            base_x = int(pos_x)
-            base_y = int(pos_y)
+            # Exact 2x2 bounding footprint (max width/height = 2 px)
+            x0 = int(ti.floor(pos_x - r_pix))
+            x1 = int(ti.floor(pos_x + r_pix))
+            y0 = int(ti.floor(pos_y - r_pix))
+            y1 = int(ti.floor(pos_y + r_pix))
 
-            for dx in ti.static(range(-2, 3)):
-                for dy in ti.static(range(-2, 3)):
-                    qx = base_x + dx
-                    qy = base_y + dy
+            for qx in range(x0, x1 + 1):
+                for qy in range(y0, y1 + 1):
                     if 0 <= qx < 64 and 0 <= qy < 64:
                         diff_x = (ti.f32(qx) + 0.5) - pos_x
                         diff_y = (ti.f32(qy) + 0.5) - pos_y
                         d2 = diff_x * diff_x + diff_y * diff_y
-                        if d2 <= r2_pix or (ti.abs(diff_x) <= 0.80 and ti.abs(diff_y) <= 0.80):
+                        # Check circular distance OR exact 2x2 footprint coverage
+                        if d2 <= r2_pix or (x1 - x0 <= 1 and y1 - y0 <= 1):
                             if w > self.matrix_weight[qx, qy]:
                                 self.matrix_weight[qx, qy] = w
                                 self.raw_matrix_color[qx, qy] = col
@@ -711,6 +973,8 @@ def run_taichi_gui(matrix_mode: bool = False) -> None:
             matrix_view = not matrix_view
         if window.is_pressed("p"):
             led_mode = 1 - led_mode
+        if window.is_pressed("q"):
+            sim.use_q16_physics = not sim.use_q16_physics
 
         # Update physics
         if not paused:
@@ -734,6 +998,7 @@ def run_taichi_gui(matrix_mode: bool = False) -> None:
             gui.text(f"Drum Angle: {math.degrees(sim.theta) % 360.0:.1f}°")
 
             paused = gui.checkbox("Pause Simulation [Space]", paused)
+            sim.use_q16_physics = gui.checkbox("RP2040 Q16.16 Physics [Q]", sim.use_q16_physics)
             matrix_view = gui.checkbox("64x64 Matrix Display [M]", matrix_view)
             if matrix_view:
                 led_round = gui.checkbox("Round LEDs vs Square Voxels [P]", bool(led_mode))
