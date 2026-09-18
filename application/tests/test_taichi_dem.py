@@ -133,3 +133,20 @@ def test_box_particle_bins(ti_init):
     assert stats["escaped"] == 0
     assert stats["ratio"] == 100.0
     assert sum(stats["layers"]) == 200
+
+
+def test_pure_q16_integer_physics(ti_init):
+    """Test 100% pure Q16.16 integer DEM physics engine matching RP2040 Cortex-M0+."""
+    cfg = TaichiDEMConfig(n_particles=100)
+    sim = TaichiRotatingDrumDEM(cfg)
+    sim.use_q16_physics = True
+
+    # Run for 20 frames with gravity
+    for _ in range(20):
+        sim.step()
+
+    pos = sim.pos.to_numpy()
+    assert np.all(np.isfinite(pos))
+    # Particles should be bounded within [0, 1] screen space
+    assert np.all(pos >= 0.0)
+    assert np.all(pos <= 1.0)

@@ -9,6 +9,7 @@
 #define HUB75_PIO_H
 
 #include <hardware/pio.h>
+#include <hardware/clocks.h>
 
 // ============================================
 // hub75_data program
@@ -75,8 +76,12 @@ static inline void hub75_data_program_init(PIO pio, uint sm, uint offset,
     // Join FIFO for TX only
     sm_config_set_fifo_join(&c, PIO_FIFO_JOIN_TX);
     
-    // Run at full speed
-    sm_config_set_clkdiv(&c, 1.0f);
+    // Keep PIO shift edges slow while cores stay overclocked for DEM:
+    // 1 pixel = 18 PIO cycles at ~36 MHz PIO clock (~500 ns/px, ~2 MHz toggle)
+    // preserves 74HC595 setup/hold margins on marginal contacts and ribbons.
+    float div = (float)clock_get_hz(clk_sys) / 36000000.0f;
+    if (div < 1.0f) div = 1.0f;
+    sm_config_set_clkdiv(&c, div);
     
     // Initialize and enable
     pio_sm_init(pio, sm, offset, &c);

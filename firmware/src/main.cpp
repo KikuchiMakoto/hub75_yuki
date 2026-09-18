@@ -188,54 +188,55 @@ void convert_to_bcm(uint16_t* pixels) {
 }
 
 // ============================================
-// Convert 64x64 DEM frame to BCM planes (Two chained 64x32 panels)
+// Convert 64x64 DEM frame to BCM planes (Ultra-fast direct bit extraction)
+// Prioritizes pure speed and throughput over perceptual gamma curve
 // ============================================
 void convert_64x64_to_bcm(const uint16_t frame[64][64]) {
     for (int row = 0; row < SCAN_ROWS; row++) {
+        const uint16_t *p2_up = &frame[63 - row][0];
+        const uint16_t *p2_lo = &frame[47 - row][0];
+        const uint16_t *p1_up = &frame[row][0];
+        const uint16_t *p1_lo = &frame[16 + row][0];
+
         for (int x = 0; x < DISPLAY_WIDTH; x++) {
-            uint16_t p_up, p_lo;
+            uint16_t up, lo;
             if (x < 64) {
                 // Panel 2 (Bottom Panel, Y: 32..63) - ROTATED 180 DEGREES
-                // Physical line row maps to display row (63 - row)
-                // Physical line (16 + row) maps to display row (47 - row)
-                // Shift clock index x maps to display column (63 - x)
                 int col = 63 - x;
-                p_up = frame[63 - row][col];
-                p_lo = frame[47 - row][col];
+                up = p2_up[col];
+                lo = p2_lo[col];
             } else {
                 // Panel 1 (Top Panel, Y: 0..31) - NORMAL ORIENTATION (0 deg)
                 int col = x - 64;
-                p_up = frame[row][col];
-                p_lo = frame[16 + row][col];
+                up = p1_up[col];
+                lo = p1_lo[col];
             }
 
-            // Extract and scale to 8-bit, then apply gamma
-            uint8_t r0 = gamma_tbl[((p_up >> 11) & 0x1F) << 3];
-            uint8_t g0 = gamma_tbl[((p_up >> 5) & 0x3F) << 2];
-            uint8_t b0 = gamma_tbl[(p_up & 0x1F) << 3];
+            // Directly unpack RGB565 to 6-bit color channels without gamma lookup
+            // r: 5 bits -> shift left 1 (0..62)
+            // g: 6 bits -> (0..63)
+            // b: 5 bits -> shift left 1 (0..62)
+            uint32_t r0 = (up >> 10) & 0x3E;
+            uint32_t g0 = (up >> 5)  & 0x3F;
+            uint32_t b0 = (up << 1)  & 0x3E;
 
-            uint8_t r1 = gamma_tbl[((p_lo >> 11) & 0x1F) << 3];
-            uint8_t g1 = gamma_tbl[((p_lo >> 5) & 0x3F) << 2];
-            uint8_t b1 = gamma_tbl[(p_lo & 0x1F) << 3];
+            uint32_t r1 = (lo >> 10) & 0x3E;
+            uint32_t g1 = (lo >> 5)  & 0x3F;
+            uint32_t b1 = (lo << 1)  & 0x3E;
 
-            r0 >>= (8 - COLOR_DEPTH);
-            g0 >>= (8 - COLOR_DEPTH);
-            b0 >>= (8 - COLOR_DEPTH);
-            r1 >>= (8 - COLOR_DEPTH);
-            g1 >>= (8 - COLOR_DEPTH);
-            b1 >>= (8 - COLOR_DEPTH);
-
-            for (int bit = 0; bit < COLOR_DEPTH; bit++) {
-                uint8_t mask = 1 << bit;
-                uint8_t packed = 0;
-                if (r0 & mask) packed |= 0x01;
-                if (g0 & mask) packed |= 0x02;
-                if (b0 & mask) packed |= 0x04;
-                if (r1 & mask) packed |= 0x08;
-                if (g1 & mask) packed |= 0x10;
-                if (b1 & mask) packed |= 0x20;
-                bcm_planes[row][bit][x] = packed;
-            }
+            // Direct bit extraction into BCM planes (unrolled 6 planes, single-cycle shifts)
+            bcm_planes[row][0][x] = ((r0 & 1)) | ((g0 & 1) << 1) | ((b0 & 1) << 2) |
+                                    ((r1 & 1) << 3) | ((g1 & 1) << 4) | ((b1 & 1) << 5);
+            bcm_planes[row][1][x] = (((r0 >> 1) & 1)) | (((g0 >> 1) & 1) << 1) | (((b0 >> 1) & 1) << 2) |
+                                    (((r1 >> 1) & 1) << 3) | (((g1 >> 1) & 1) << 4) | (((b1 >> 1) & 1) << 5);
+            bcm_planes[row][2][x] = (((r0 >> 2) & 1)) | (((g0 >> 2) & 1) << 1) | (((b0 >> 2) & 1) << 2) |
+                                    (((r1 >> 2) & 1) << 3) | (((g1 >> 2) & 1) << 4) | (((b1 >> 2) & 1) << 5);
+            bcm_planes[row][3][x] = (((r0 >> 3) & 1)) | (((g0 >> 3) & 1) << 1) | (((b0 >> 3) & 1) << 2) |
+                                    (((r1 >> 3) & 1) << 3) | (((g1 >> 3) & 1) << 4) | (((b1 >> 3) & 1) << 5);
+            bcm_planes[row][4][x] = (((r0 >> 4) & 1)) | (((g0 >> 4) & 1) << 1) | (((b0 >> 4) & 1) << 2) |
+                                    (((r1 >> 4) & 1) << 3) | (((g1 >> 4) & 1) << 4) | (((b1 >> 4) & 1) << 5);
+            bcm_planes[row][5][x] = (((r0 >> 5) & 1)) | (((g0 >> 5) & 1) << 1) | (((b0 >> 5) & 1) << 2) |
+                                    (((r1 >> 5) & 1) << 3) | (((g1 >> 5) & 1) << 4) | (((b1 >> 5) & 1) << 5);
         }
     }
 }
@@ -370,18 +371,23 @@ void __not_in_flash_func(hub75_refresh)() {
             // 5. Wait for DMA complete
             dma_channel_wait_for_finish_blocking(dma_chan);
 
-            // 6. Wait for PIO to finish shifting
+            // 6. Wait for PIO to finish shifting the final pixel.
+            // TX-FIFO-empty only means the last word left the FIFO; the 6-bit
+            // shift + CLK edges still need ~1 pixel time (~135 ns at the
+            // 133 MHz-equivalent PIO rate). 1 us covers it at any sysclk.
+            // (Fixed NOP counts shrink under overclock and violate this.)
             while (!pio_sm_is_tx_fifo_empty(hub75_pio, sm_data)) {
                 tight_loop_contents();
             }
-            __asm volatile("nop\nnop\nnop\nnop");
+            delayMicroseconds(1);
 
             // 7. Set row address
             set_row_address(row);
 
-            // 8. Latch pulse
+            // 8. Latch pulse (74HC595 needs >= 20 ns; 4 NOPs = 16 ns at
+            // 250 MHz, which violates it — use a time-based hold instead)
             sio_hw->gpio_set = LAT_MASK;
-            __asm volatile("nop\nnop\nnop\nnop");
+            delayMicroseconds(1);
             sio_hw->gpio_clr = LAT_MASK;
 
             // 9. Enable output
@@ -410,9 +416,13 @@ static inline void __not_in_flash_func(shift_out_pixel)(uint8_t data) {
     sio_hw->gpio_clr = RGB_MASK;
     sio_hw->gpio_set = (data & 0x3F);
 
+    // Slow edges for marginal contacts/ribbons: ~180 ns setup before CLK rise
+    // (intermittent row-doubling exonerated fast toggling; scan stays ~290 Hz)
+    for (int k = 0; k < 16; k++) { __asm volatile("nop"); }
+
     // Clock pulse - rising edge latches data into shift register
     sio_hw->gpio_set = CLK_MASK;
-    __asm volatile("nop\nnop\nnop\nnop\nnop\nnop\nnop\nnop");
+    for (int k = 0; k < 16; k++) { __asm volatile("nop"); }
     sio_hw->gpio_clr = CLK_MASK;
 }
 
@@ -436,9 +446,9 @@ void __not_in_flash_func(hub75_refresh)() {
             // 3. Set row address
             set_row_address(row);
 
-            // 4. Latch pulse
+            // 4. Latch pulse (time-based hold: fixed NOPs shrink under overclock)
             sio_hw->gpio_set = LAT_MASK;
-            __asm volatile("nop\nnop\nnop\nnop");
+            delayMicroseconds(1);
             sio_hw->gpio_clr = LAT_MASK;
 
             // 5. Enable output (OE LOW)
@@ -580,15 +590,73 @@ void loop() {
     }
 
     // 2. Standalone Mode: if no USB serial frame received in last 500 ms,
-    // execute real-time Q16.16 DEM physics simulation with ADXL335!
+    // execute real-time DEM physics simulation with ADXL335!
     if (millis() - last_usb_frame_time > 500) {
-        // Step DEM simulation (reads GP26 X & GP27 Y, advances Q16.16 physics)
+        static uint32_t s_frame_count = 0;
+        static uint32_t s_last_fps_time = 0;
+        static uint32_t s_total_step_us = 0;
+
+        // Boot self-test phase 1 (first 2 s): static full-range Turbo stripes
+        // through the SAME convert_64x64_to_bcm + Core1 path as DEM.
+        // (Bottom panel shows stripes mirrored: expected 180 deg rotation.)
+        uint32_t boot_ms = millis();
+        if (boot_ms < 2000) {
+            for (int y = 0; y < 64; y++) {
+                for (int x = 0; x < 64; x++) {
+                    standalone_frame[y][x] = turbo_rgb565_lut[(x * 4) & 0xFF];
+                }
+            }
+            convert_64x64_to_bcm(standalone_frame);
+            return;
+        }
+
+        // Boot self-test phase 2: row-walk. Light ONE logical row white at a
+        // time (250 ms each, rows 0..31 top panel then 32..63 bottom).
+        // Firmware has no row-periodic mechanism, so a skipped/duplicated row
+        // number identifies the address line or panel row driver at fault.
+        if (boot_ms < 2000 + 64 * 250) {
+            int walk = (boot_ms - 2000) / 250; // 0..63
+            memset(standalone_frame, 0, sizeof(standalone_frame));
+            for (int x = 0; x < 64; x++) {
+                standalone_frame[walk][x] = 0xFFFF;
+            }
+            convert_64x64_to_bcm(standalone_frame);
+            return;
+        }
+
+        uint32_t t_start = time_us_32();
+
+        // Step DEM simulation (reads GP26 X & GP27 Y, advances physics)
         dem_step();
+
+        uint32_t t_step = time_us_32();
 
         // Render to 64x64 frame buffer with Turbo colormap and 3x3 hole-fill filter
         dem_render(standalone_frame);
 
         // Convert 64x64 buffer to BCM planes for Core1 HUB75 driving
         convert_64x64_to_bcm(standalone_frame);
+
+        uint32_t t_end = time_us_32();
+
+        s_frame_count++;
+        s_total_step_us += (t_step - t_start);
+
+        uint32_t now_ms = millis();
+        // Telemetry only while USB CDC is actually connected: a blocking
+        // printf into an undrained CDC FIFO stalls the whole loop (fps collapse).
+        if (now_ms - s_last_fps_time >= 2000 && Serial) {
+            float fps = (float)s_frame_count * 1000.0f / (float)(now_ms - s_last_fps_time);
+            uint32_t avg_step_us = s_frame_count ? (s_total_step_us / s_frame_count) : 0;
+            printf("[DEM] FPS: %.1f | Step: %lu us | Sensor: %s (raw: %u,%u | g: %.2f,%.2f)\n",
+                   fps, avg_step_us,
+                   g_dem_sensor_connected ? "OK" : "NO_SENSOR (Default +1G Down)",
+                   g_dem_last_raw_x, g_dem_last_raw_y,
+                   (float)g_dem_last_gx / (float)DEM_GRAVITY_SCALE,
+                   (float)g_dem_last_gy / (float)DEM_GRAVITY_SCALE);
+            s_frame_count = 0;
+            s_total_step_us = 0;
+            s_last_fps_time = now_ms;
+        }
     }
 }

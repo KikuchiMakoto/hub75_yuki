@@ -1,306 +1,541 @@
-#ifndef STANDALONE_DEM_H
-#define STANDALONE_DEM_H
+#pragma once
 
 #include <stdint.h>
 #include <string.h>
-#include <math.h>
-#include <hardware/adc.h>
-#include <pico/platform.h>
+#include "pico/stdlib.h"
+#include "hardware/divider.h"
+#include "hardware/adc.h"
 #include "adxl335_config.h"
-#include "turbo_lut.h"
 
-// Number of silica sand particles (optimized for solid 30-40 FPS in SRAM)
-#define DEM_N 768
+#ifdef __cplusplus
+extern "C" {
+#endif
 
-// 64x64 container dimensions in pixels
-#define BOX_WIDTH  64.0f
-#define BOX_HEIGHT 64.0f
+// ============================================================================
+// Ultra-Stable High-Speed Discrete Element Method (DEM) for RP2040 (Q16.16)
+//
+// Key Stability & Flow Architecture:
+// 1. Soft-Core Progressive Hooke Spring + Directional Closing Dashpot (zeta ~ 0.65)
+// 2. Soft Contact Position Relaxation (anti-collapse & anti-explosion overburden relief)
+// 3. Frictionless Glass-Smooth Wall Normal Springs with independent tangent sliding
+// 4. Global Atmospheric Viscous Drag (v -= v >> 7) dissipating acoustic jitter
+// 5. 64-bit Overflow-Free ADXL335 Acceleration Vector Scaling
+// ============================================================================
 
-// Particle radius = 0.72 pixels (diameter = 1.44 pixels, zero gaps on 64x64)
-#define PARTICLE_R    0.72f
-#define PARTICLE_DIAM 1.44f
-#define PARTICLE_DIAM2 (PARTICLE_DIAM * PARTICLE_DIAM)
+#define DEM_N 1024
 
-// Spatial Grid: 32x32 cells (each cell is 2.0x2.0 pixels >= DIAM)
+// Fixed-Point Q16.16 Math Helpers
+#define Q16_SHIFT 16
+#define Q16_ONE   65536
+#define INT_TO_Q16(x) ((int32_t)((x) << Q16_SHIFT))
+#define Q16_TO_INT(x) ((int)((x) >> Q16_SHIFT))
+
+static inline int32_t __not_in_flash_func(q16_mul)(int32_t a, int32_t b) {
+    return (int32_t)((((int64_t)a) * b) >> Q16_SHIFT);
+}
+
+static inline int32_t __not_in_flash_func(q16_div)(int32_t a, int32_t b) {
+    if (b == 0) return (a >= 0) ? 0x7FFFFFFF : (int32_t)0x80000001;
+    return (int32_t)((((int64_t)a) << Q16_SHIFT) / b);
+}
+
+// Bitwise Integer Square Root for Q16.16 (16-step non-restoring, branchless inner)
+static inline int32_t __not_in_flash_func(q16_sqrt)(int32_t val) {
+    if (val <= 0) return 0;
+    uint32_t rem = (uint32_t)val;
+    uint32_t root = 0;
+    for (uint32_t s = 0x40000000; s != 0; s >>= 2) {
+        if (rem >= root + s) {
+            rem -= root + s;
+            root = (root >> 1) + s;
+        } else {
+            root >>= 1;
+        }
+    }
+    return (int32_t)(root << 8);
+}
+
+// ============================================================================
+// Geometry & Grid Constants
+// ============================================================================
+#define DEM_BOX_WIDTH        4194304  // 64.0 px in Q16
+#define DEM_PARTICLE_DIAM      98304  // 1.5 px in Q16 (matches Taichi D=1.5)
+#define DEM_PARTICLE_R         49152  // 0.75 px in Q16
+#define DEM_PARTICLE_DIAM2    147456  // (1.5)^2 = 2.25 in Q16
+
+#define DEM_WALL_MIN         (DEM_PARTICLE_R)
+#define DEM_WALL_MAX         (DEM_BOX_WIDTH - DEM_PARTICLE_R)
+#define DEM_WALL_SPRING_MIN  (DEM_PARTICLE_R)
+#define DEM_WALL_SPRING_MAX  (DEM_BOX_WIDTH - DEM_PARTICLE_R)
+#define DEM_WALL_HARD_MIN    (DEM_PARTICLE_R >> 2)           // 10240 (0.156 px)
+#define DEM_WALL_HARD_MAX    (DEM_BOX_WIDTH - DEM_WALL_HARD_MIN) // 4184064 (63.844 px)
+
+// Spatial Hash Grid (32x32 cells -> 2.0 px/cell, covers 64x64 domain)
 #define GRID_DIM 32
-#define CELL_SIZE 2.0f
-#define INV_CELL_SIZE 0.5f
+#define CELL_SHIFT 1
+#define GRID_TOTAL_CELLS (GRID_DIM * GRID_DIM)
 
-// Particle state arrays (pure float / f32)
-static float dem_pos_x[DEM_N];
-static float dem_pos_y[DEM_N];
-static float dem_vel_x[DEM_N];
-static float dem_vel_y[DEM_N];
-static float dem_force_x[DEM_N];
-static float dem_force_y[DEM_N];
-static float dem_contact_force[DEM_N];
+// ============================================================================
+// Physical Tuning Parameters (Harmonized with Taichi DEM Physics)
+// ============================================================================
+#define DEM_DT                    262  // 0.004 s in Q16.16
+#define DEM_GRAVITY_SCALE    14417920  // 220.0 px/s^2 at 1G (smooth lively sand flow)
 
-// Spatial grid linked-cell arrays
-static uint16_t dem_grid_head[GRID_DIM * GRID_DIM];
-static uint16_t dem_grid_next[DEM_N];
+#define DEM_KN              262144000  // 4000.0 px/s^2/px Hooke normal spring
+#define DEM_DAMP              5242880  // 80.0 1/s dashpot damping (zeta ~ 0.65)
+#define DEM_FRICTION            22938  // 0.35 Coulomb friction coefficient
+#define DEM_GAMMA_T            983040  // 15.0 1/s tangential shear slip damping
 
-// Intermediate 64x64 frame buffer
-static uint16_t dem_raw_frame[64][64];
+#define DEM_WALL_KN         393216000  // 6000.0 px/s^2/px wall normal spring
+#define DEM_WALL_DAMP         6553600  // 100.0 1/s wall normal dashpot damping
 
-// Physics parameters (calibrated in f32)
-static const float dem_dt = 0.010f;        // 3 substeps per frame = 30-35 FPS physics
-static const float dem_kn = 320.0f;        // contact spring stiffness
-static const float dem_damp = 4.0f;        // dashpot damping
-static const float dem_friction = 0.45f;   // Coulomb friction
-static const float dem_max_a = 500.0f;     // max acceleration clamp (pixels/s^2)
-static const float dem_max_v = 110.0f;     // max velocity clamp (pixels/s)
+// Gravity axis sign (set to -1 if ADXL335 is mounted rotated).
+// If sand piles to the TOP wall while the board bottom is down,
+// set DEM_GRAV_SIGN_Y to -1 (same for X).
+#ifndef DEM_GRAV_SIGN_X
+#define DEM_GRAV_SIGN_X 1
+#endif
+#ifndef DEM_GRAV_SIGN_Y
+#define DEM_GRAV_SIGN_Y 1
+#endif
 
-static inline void dem_init(void) {
-    // Initialize ADC for ADXL335 on GP26 (X) and GP27 (Y)
+// Plain-integer factors for 32-bit fast paths (exact: Q16 const = INT * 65536).
+// Cortex-M0+ has no 64-bit multiplier: q16_mul costs ~200c via __aeabi_lmul,
+// while 32-bit MULS is 1c. Every product below is proven (tests/test_q16_range_audit.py)
+// to fit signed 32-bit, so the hot loop uses no 64-bit multiply at all
+// (only q16_sqrt + two q16_div per contact remain wide).
+#define DEM_KN_INT           4000  // == DEM_KN / 65536
+#define DEM_DAMP_INT           80  // == DEM_DAMP / 65536
+#define DEM_GAMMA_INT          15  // == DEM_GAMMA_T / 65536
+#define DEM_WALL_KN_INT      6000  // == DEM_WALL_KN / 65536
+#define DEM_WALL_DAMP_INT     100  // == DEM_WALL_DAMP / 65536
+#define DEM_GRAV_INT          220  // == DEM_GRAVITY_SCALE / 65536
+#define DEM_DT_NUM            262  // q16_mul(v,DT) = (v*262)>>16 needs v*262 in int32
+#define DEM_FRIC_NUM            7  // friction 0.35 = 7/20 exact: ft_max = (fn*7)/20
+#define DEM_FRIC_DEN           20
+
+// Overburden Relaxation Threshold & Safety Clamps
+#define DEM_OVERLAP_TOL          5243  // 0.08 px tolerance before position relaxation
+#define DEM_FN_MAX           98304000  // 1500.0 px/s^2 maximum contact force
+#define DEM_WALL_FN_MAX     131072000  // 2000.0 px/s^2 maximum wall force
+#define DEM_MAX_A           196608000  // 3000.0 px/s^2 maximum particle acceleration
+#define DEM_MAX_V             2949120  // 45.0 px/s maximum velocity (tunneling impossible)
+
+// ============================================================================
+// Particle State Arrays (SRAM BSS)
+// ============================================================================
+static int32_t dem_pos_x[DEM_N];
+static int32_t dem_pos_y[DEM_N];
+static int32_t dem_vel_x[DEM_N];
+static int32_t dem_vel_y[DEM_N];
+static int32_t dem_force_x[DEM_N];
+static int32_t dem_force_y[DEM_N];
+static int32_t dem_contact_force[DEM_N];
+
+static uint16_t grid_head[GRID_TOTAL_CELLS];
+static uint16_t grid_next[DEM_N];
+
+// ============================================================================
+// Precomputed 256-entry Turbo Colormap (RGB565 Little-Endian)
+// ============================================================================
+static const uint16_t turbo_rgb565_lut[256] = {
+    0x20C3, 0x28C5, 0x28E6, 0x30E8, 0x3109, 0x392A, 0x392C, 0x394D,
+    0x414E, 0x416F, 0x4190, 0x4191, 0x41B2, 0x49B3, 0x49D4, 0x49F5,
+    0x49F5, 0x4A16, 0x4A37, 0x4A37, 0x4A58, 0x4A79, 0x4A79, 0x4A9A,
+    0x4ABA, 0x4ABB, 0x4ADB, 0x4AFB, 0x4AFC, 0x4B1C, 0x4B3C, 0x435D,
+    0x435D, 0x437D, 0x439D, 0x439E, 0x43BE, 0x43DE, 0x43DE, 0x3BFE,
+    0x3C1E, 0x3C1E, 0x3C3E, 0x3C5E, 0x3C5E, 0x347E, 0x349E, 0x349E,
+    0x34BE, 0x34DE, 0x34DE, 0x34FE, 0x351E, 0x2D1D, 0x2D3D, 0x2D3D,
+    0x2D5D, 0x2D7D, 0x2D7D, 0x2D9C, 0x2D9C, 0x2DBC, 0x2DDC, 0x2DDB,
+    0x2DFB, 0x2DFB, 0x2E1B, 0x2E1A, 0x263A, 0x265A, 0x2E5A, 0x2E79,
+    0x2E79, 0x2E99, 0x2E98, 0x2E98, 0x2EB8, 0x2EB8, 0x2ED7, 0x2ED7,
+    0x2EF7, 0x2EF6, 0x2F16, 0x2F16, 0x3715, 0x3735, 0x3735, 0x3734,
+    0x3754, 0x3754, 0x3F53, 0x3F73, 0x3F73, 0x3F73, 0x3F92, 0x4792,
+    0x4792, 0x4791, 0x47B1, 0x4FB1, 0x4FB0, 0x4FB0, 0x4FB0, 0x57D0,
+    0x57CF, 0x57CF, 0x5FCF, 0x5FCE, 0x5FCE, 0x67CE, 0x67CE, 0x67CD,
+    0x6FED, 0x6FED, 0x6FED, 0x77EC, 0x77EC, 0x77EC, 0x7FEC, 0x7FEB,
+    0x7FEB, 0x87EB, 0x87CB, 0x8FCB, 0x8FCA, 0x8FCA, 0x97CA, 0x97CA,
+    0x97CA, 0x9FC9, 0x9FA9, 0xA7A9, 0xA7A9, 0xA7A9, 0xAFA9, 0xAF88,
+    0xAF88, 0xB788, 0xB788, 0xBF68, 0xBF68, 0xBF67, 0xC747, 0xC747,
+    0xC747, 0xCF27, 0xCF27, 0xCF27, 0xD707, 0xD706, 0xD706, 0xDEE6,
+    0xDEE6, 0xDEC6, 0xDEC6, 0xE6A6, 0xE6A6, 0xE686, 0xEE86, 0xEE66,
+    0xEE65, 0xEE45, 0xEE45, 0xF625, 0xF625, 0xF605, 0xF605, 0xF5E5,
+    0xFDE5, 0xFDC5, 0xFDA5, 0xFDA5, 0xFD85, 0xFD85, 0xFD64, 0xFD44,
+    0xFD44, 0xFD24, 0xFD04, 0xFD04, 0xFCE4, 0xFCE4, 0xFCC4, 0xFCA4,
+    0xFCA4, 0xFC84, 0xFC64, 0xFC64, 0xFC44, 0xFC24, 0xFC04, 0xFC04,
+    0xFBE3, 0xFBC3, 0xFBC3, 0xFBA3, 0xFB83, 0xFB83, 0xFB63, 0xFB43,
+    0xF343, 0xF323, 0xF303, 0xF303, 0xF2E3, 0xEAC3, 0xEAC3, 0xEAA3,
+    0xEA83, 0xEA82, 0xE262, 0xE242, 0xE242, 0xDA22, 0xDA02, 0xDA02,
+    0xD9E2, 0xD1C2, 0xD1C2, 0xD1A2, 0xC9A2, 0xC982, 0xC982, 0xC161,
+    0xC161, 0xC141, 0xB941, 0xB921, 0xB921, 0xB901, 0xB101, 0xB0E1,
+    0xB0E1, 0xA8C1, 0xA8C1, 0xA8C1, 0xA0A0, 0xA0A0, 0xA0A0, 0xA080,
+    0x9880, 0x9880, 0x9880, 0x9880, 0x9060, 0x9060, 0x9060, 0x9060,
+    0x9060, 0x9060, 0x9060, 0x9060, 0x9060, 0x9060, 0x9060, 0x9060
+};
+
+static int32_t g_dem_last_gx = 0;
+static int32_t g_dem_last_gy = 0;
+static uint16_t g_dem_last_raw_x = 0;
+static uint16_t g_dem_last_raw_y = 0;
+static bool g_dem_sensor_connected = false;
+
+// ============================================================================
+// Initialization: Perfectly Staggered Non-Overlapping Sand Bed & Hardware ADC
+// ============================================================================
+static void __not_in_flash_func(dem_init)(void) {
+    // 1. Initialize RP2040 Hardware ADC (pure 12-bit, 0-4095)
     adc_init();
-    adc_gpio_init(ADXL335_PIN_X);
-    adc_gpio_init(ADXL335_PIN_Y);
+    adc_gpio_init(26); // GP26 = ADC0 (ADXL335 X-axis)
+    adc_gpio_init(27); // GP27 = ADC1 (ADXL335 Y-axis)
 
-    // Seed particle positions in bottom half of 64x64 box
-    int cols = 32;
-    float spacing_x = 56.0f / (float)cols;
-    float spacing_y = PARTICLE_DIAM * 0.95f;
+    int32_t start_x = (4 << 16);      // 4.0 px
+    int32_t start_y = (4 << 16);      // 4.0 px
+    int32_t spacing_x = 103219;       // 1.575 px (D * 1.05, non-overlapping)
+    int32_t spacing_y = 93389;        // 1.425 px (D * 0.95)
 
+    int cols = 36;
     for (int i = 0; i < DEM_N; i++) {
-        int col = i % cols;
-        int row = i / cols;
-        float x = 4.0f + (float)col * spacing_x + ((row % 2) ? (spacing_x * 0.5f) : 0.0f);
-        float y = 60.0f - (float)row * spacing_y;
-        if (y < 4.0f) y = 4.0f;
+        int c = i % cols;
+        int r = i / cols;
+        int32_t x = start_x + c * spacing_x + ((r & 1) ? (spacing_x >> 1) : 0);
+        int32_t y = start_y + r * spacing_y;
+
         dem_pos_x[i] = x;
         dem_pos_y[i] = y;
-        dem_vel_x[i] = 0.0f;
-        dem_vel_y[i] = 0.0f;
-        dem_force_x[i] = 0.0f;
-        dem_force_y[i] = 0.0f;
-        dem_contact_force[i] = 0.0f;
+        dem_vel_x[i] = 0;
+        dem_vel_y[i] = 0;
+        dem_force_x[i] = 0;
+        dem_force_y[i] = 0;
+        dem_contact_force[i] = 0;
     }
 }
 
-// Critical hot-path function placed directly in RAM for 20x execution speedup
-static void __not_in_flash_func(dem_substep)(float gx, float gy) {
-    // 1. Reset forces & apply gravity
+// Cell coordinate helper
+static inline int __not_in_flash_func(get_cell_idx)(int32_t px, int32_t py) {
+    int cx = (px >> (Q16_SHIFT + CELL_SHIFT));
+    int cy = (py >> (Q16_SHIFT + CELL_SHIFT));
+    if (cx < 0) cx = 0;
+    else if (cx >= GRID_DIM) cx = GRID_DIM - 1;
+    if (cy < 0) cy = 0;
+    else if (cy >= GRID_DIM) cy = GRID_DIM - 1;
+    return cy * GRID_DIM + cx;
+}
+
+// ============================================================================
+// Core Physics Substep
+// ============================================================================
+static void __not_in_flash_func(dem_substep)(int32_t gx, int32_t gy) {
+    // 1. Reset forces & initialize with ADXL335 gravity
     for (int i = 0; i < DEM_N; i++) {
         dem_force_x[i] = gx;
         dem_force_y[i] = gy;
-        dem_contact_force[i] = 0.0f;
+        dem_contact_force[i] = 0;
     }
 
-    // 2. Build spatial grid (O(N) linked-cell)
-    memset(dem_grid_head, 0xFF, sizeof(dem_grid_head));
+    // 2. Spatial Hash Grid Construction
+    memset(grid_head, 0xFF, sizeof(grid_head));
     for (int i = 0; i < DEM_N; i++) {
-        int cx = (int)(dem_pos_x[i] * INV_CELL_SIZE);
-        int cy = (int)(dem_pos_y[i] * INV_CELL_SIZE);
-        if (cx < 0) cx = 0; else if (cx >= GRID_DIM) cx = GRID_DIM - 1;
-        if (cy < 0) cy = 0; else if (cy >= GRID_DIM) cy = GRID_DIM - 1;
-        int cell = cy * GRID_DIM + cx;
-        dem_grid_next[i] = dem_grid_head[cell];
-        dem_grid_head[cell] = (uint16_t)i;
+        int cell = get_cell_idx(dem_pos_x[i], dem_pos_y[i]);
+        grid_next[i] = grid_head[cell];
+        grid_head[cell] = (uint16_t)i;
     }
 
-    // 3. Fast neighbor collision checks via 32x32 grid
+    // 3. Particle-Particle Contact Mechanics with Soft Relaxation
     for (int i = 0; i < DEM_N; i++) {
-        int cx = (int)(dem_pos_x[i] * INV_CELL_SIZE);
-        int cy = (int)(dem_pos_y[i] * INV_CELL_SIZE);
+        int32_t px = dem_pos_x[i];
+        int32_t py = dem_pos_y[i];
+        int32_t vx_i = dem_vel_x[i];
+        int32_t vy_i = dem_vel_y[i];
+
+        int cx = (px >> (Q16_SHIFT + CELL_SHIFT));
+        int cy = (py >> (Q16_SHIFT + CELL_SHIFT));
         if (cx < 0) cx = 0; else if (cx >= GRID_DIM) cx = GRID_DIM - 1;
         if (cy < 0) cy = 0; else if (cy >= GRID_DIM) cy = GRID_DIM - 1;
-
-        float px = dem_pos_x[i];
-        float py = dem_pos_y[i];
-        float vx = dem_vel_x[i];
-        float vy = dem_vel_y[i];
-
-        float fx = 0.0f;
-        float fy = 0.0f;
-        float f_accum = 0.0f;
 
         for (int dy = -1; dy <= 1; dy++) {
             int ncy = cy + dy;
             if (ncy < 0 || ncy >= GRID_DIM) continue;
+
             for (int dx = -1; dx <= 1; dx++) {
                 int ncx = cx + dx;
                 if (ncx < 0 || ncx >= GRID_DIM) continue;
 
                 int cell = ncy * GRID_DIM + ncx;
-                for (int j = dem_grid_head[cell]; j != 0xFFFF; j = dem_grid_next[j]) {
-                    if (j <= i) continue;
+                for (uint16_t j = grid_head[cell]; j != 0xFFFF; j = grid_next[j]) {
+                    if (j <= (uint16_t)i) continue; // Symmetric pair evaluation
 
-                    float diff_x = px - dem_pos_x[j];
-                    float diff_y = py - dem_pos_y[j];
-                    if (diff_x >= PARTICLE_DIAM || diff_x <= -PARTICLE_DIAM ||
-                        diff_y >= PARTICLE_DIAM || diff_y <= -PARTICLE_DIAM) continue;
+                    int32_t diff_x = px - dem_pos_x[j];
+                    if (diff_x >= DEM_PARTICLE_DIAM || diff_x <= -DEM_PARTICLE_DIAM) continue;
 
-                    float d2 = diff_x * diff_x + diff_y * diff_y;
-                    if (d2 > 0.0001f && d2 < PARTICLE_DIAM2) {
-                        float dist = sqrtf(d2);
-                        if (dist > 0.0001f) {
-                            float overlap = PARTICLE_DIAM - dist;
-                            float inv_d = 1.0f / dist;
-                            float ndir_x = diff_x * inv_d;
-                            float ndir_y = diff_y * inv_d;
+                    int32_t diff_y = py - dem_pos_y[j];
+                    if (diff_y >= DEM_PARTICLE_DIAM || diff_y <= -DEM_PARTICLE_DIAM) continue;
 
-                            float vrel_x = vx - dem_vel_x[j];
-                            float vrel_y = vy - dem_vel_y[j];
-                            float vn = vrel_x * ndir_x + vrel_y * ndir_y;
+                    // 32-bit fast path (all products fit int32: see range audit).
+                    // d2 scale identical to q16_mul form (8-LSB truncation of diff).
+                    int32_t d2 = (diff_x >> 8) * (diff_x >> 8)
+                               + (diff_y >> 8) * (diff_y >> 8);
+                    if (d2 >= DEM_PARTICLE_DIAM2 || d2 <= 0) continue;
 
-                            float fn = dem_kn * overlap - dem_damp * vn;
-                            if (fn < 0.0f) fn = 0.0f;
-                            else if (fn > 250.0f) fn = 250.0f;
+                    int32_t dist = q16_sqrt(d2);
+                    if (dist <= 0) continue;
 
-                            // Fast Tangential Coulomb friction (zero sqrt, zero div)
-                            float vt_x = vrel_x - vn * ndir_x;
-                            float vt_y = vrel_y - vn * ndir_y;
-                            float ft_max = dem_friction * fn;
-                            float ft_x = -vt_x * 12.0f;
-                            float ft_y = -vt_y * 12.0f;
-                            if (ft_x > ft_max) ft_x = ft_max; else if (ft_x < -ft_max) ft_x = -ft_max;
-                            if (ft_y > ft_max) ft_y = ft_max; else if (ft_y < -ft_max) ft_y = -ft_max;
+                    int32_t ndir_x, ndir_y, overlap;
 
-                            float cfx = fn * ndir_x + ft_x;
-                            float cfy = fn * ndir_y + ft_y;
-
-                            fx += cfx;
-                            fy += cfy;
-                            dem_force_x[j] -= cfx;
-                            dem_force_y[j] -= cfy;
-                            f_accum += fn;
-                            dem_contact_force[j] += fn;
-                        }
+                    if (dist < 655) {
+                        // Singularity safeguard (< 0.01 px separation)
+                        dist = 655;
+                        overlap = DEM_PARTICLE_DIAM - dist;
+                        ndir_x = (((i ^ j) & 1) ? Q16_ONE : -Q16_ONE);
+                        ndir_y = (((i ^ (j * 3)) & 1) ? Q16_ONE : -Q16_ONE);
+                    } else {
+                        overlap = DEM_PARTICLE_DIAM - dist;
+                        // Exact unit normal (two 64-bit divs: the only wide ops left)
+                        ndir_x = q16_div(diff_x, dist);
+                        ndir_y = q16_div(diff_y, dist);
                     }
+
+                    // A. Hooke spring (exact integer) + closing dashpot (exact integer).
+                    // Damping ONLY when closing in (vn < 0). Never pulls particles together.
+                    int32_t vrel_x = vx_i - dem_vel_x[j];
+                    int32_t vrel_y = vy_i - dem_vel_y[j];
+                    int32_t vn = ((vrel_x >> 8) * (ndir_x >> 8))
+                               + ((vrel_y >> 8) * (ndir_y >> 8));
+
+                    int32_t fn = DEM_KN_INT * overlap;
+                    if (vn < 0) {
+                        fn -= DEM_DAMP_INT * vn;
+                    }
+                    if (fn < 0) fn = 0;
+                    else if (fn > DEM_FN_MAX) fn = DEM_FN_MAX;
+
+                    // B. Tangential viscous slip + Coulomb cap (0.35 = 7/20 exact)
+                    int32_t vt_x = vrel_x - ((vn >> 8) * (ndir_x >> 8));
+                    int32_t vt_y = vrel_y - ((vn >> 8) * (ndir_y >> 8));
+                    int32_t ft_max = (fn * DEM_FRIC_NUM) / DEM_FRIC_DEN;
+                    int32_t ft_x = -DEM_GAMMA_INT * vt_x;
+                    int32_t ft_y = -DEM_GAMMA_INT * vt_y;
+                    if (ft_x > ft_max) ft_x = ft_max;
+                    else if (ft_x < -ft_max) ft_x = -ft_max;
+                    if (ft_y > ft_max) ft_y = ft_max;
+                    else if (ft_y < -ft_max) ft_y = -ft_max;
+
+                    // Symmetric force application
+                    int32_t cfx = ((fn >> 8) * (ndir_x >> 8)) + ft_x;
+                    int32_t cfy = ((fn >> 8) * (ndir_y >> 8)) + ft_y;
+                    dem_force_x[i] += cfx;
+                    dem_force_y[i] += cfy;
+                    dem_force_x[j] -= cfx;
+                    dem_force_y[j] -= cfy;
+                    dem_contact_force[i] += fn;
+                    dem_contact_force[j] += fn;
                 }
             }
         }
-        dem_force_x[i] += fx;
-        dem_force_y[i] += fy;
-        dem_contact_force[i] += f_accum;
     }
 
-    // 4. Container 4 walls (0..64 pixels)
-    float min_coord = PARTICLE_R;
-    float max_coord = BOX_WIDTH - PARTICLE_R;
-
+    // 4. Smooth Glass Wall Springs (Normal repulsion only, zero friction)
     for (int i = 0; i < DEM_N; i++) {
-        // Left wall
-        if (dem_pos_x[i] < min_coord) {
-            float ov = min_coord - dem_pos_x[i];
-            float fn = dem_kn * ov + dem_damp * (dem_vel_x[i] < 0.0f ? -dem_vel_x[i] : 0.0f);
-            if (fn > 400.0f) fn = 400.0f;
+        int32_t px = dem_pos_x[i];
+        int32_t py = dem_pos_y[i];
+        int32_t vx = dem_vel_x[i];
+        int32_t vy = dem_vel_y[i];
+
+        // Left wall (spring engages when px < DEM_WALL_SPRING_MIN)
+        // 32-bit exact integer paths (no 64-bit multiply).
+        if (px < DEM_WALL_SPRING_MIN) {
+            int32_t ov = DEM_WALL_SPRING_MIN - px;
+            int32_t fn = DEM_WALL_KN_INT * ov;
+            if (vx < 0) fn -= DEM_WALL_DAMP_INT * vx;
+            if (fn < 0) fn = 0;
+            else if (fn > DEM_WALL_FN_MAX) fn = DEM_WALL_FN_MAX;
             dem_force_x[i] += fn;
             dem_contact_force[i] += fn;
         }
-        // Right wall
-        else if (dem_pos_x[i] > max_coord) {
-            float ov = dem_pos_x[i] - max_coord;
-            float fn = dem_kn * ov + dem_damp * (dem_vel_x[i] > 0.0f ? dem_vel_x[i] : 0.0f);
-            if (fn > 400.0f) fn = 400.0f;
+
+        // Right wall (spring engages when px > DEM_WALL_SPRING_MAX)
+        if (px > DEM_WALL_SPRING_MAX) {
+            int32_t ov = px - DEM_WALL_SPRING_MAX;
+            int32_t fn = DEM_WALL_KN_INT * ov;
+            if (vx > 0) fn += DEM_WALL_DAMP_INT * vx;
+            if (fn < 0) fn = 0;
+            else if (fn > DEM_WALL_FN_MAX) fn = DEM_WALL_FN_MAX;
             dem_force_x[i] -= fn;
             dem_contact_force[i] += fn;
         }
 
-        // Top wall
-        if (dem_pos_y[i] < min_coord) {
-            float ov = min_coord - dem_pos_y[i];
-            float fn = dem_kn * ov + dem_damp * (dem_vel_y[i] < 0.0f ? -dem_vel_y[i] : 0.0f);
-            if (fn > 400.0f) fn = 400.0f;
+        // Top wall (spring engages when py < DEM_WALL_SPRING_MIN)
+        if (py < DEM_WALL_SPRING_MIN) {
+            int32_t ov = DEM_WALL_SPRING_MIN - py;
+            int32_t fn = DEM_WALL_KN_INT * ov;
+            if (vy < 0) fn -= DEM_WALL_DAMP_INT * vy;
+            if (fn < 0) fn = 0;
+            else if (fn > DEM_WALL_FN_MAX) fn = DEM_WALL_FN_MAX;
             dem_force_y[i] += fn;
             dem_contact_force[i] += fn;
         }
-        // Bottom wall
-        else if (dem_pos_y[i] > max_coord) {
-            float ov = dem_pos_y[i] - max_coord;
-            float fn = dem_kn * ov + dem_damp * (dem_vel_y[i] > 0.0f ? dem_vel_y[i] : 0.0f);
-            if (fn > 400.0f) fn = 400.0f;
+
+        // Bottom wall (spring engages when py > DEM_WALL_SPRING_MAX)
+        if (py > DEM_WALL_SPRING_MAX) {
+            int32_t ov = py - DEM_WALL_SPRING_MAX;
+            int32_t fn = DEM_WALL_KN_INT * ov;
+            if (vy > 0) fn += DEM_WALL_DAMP_INT * vy;
+            if (fn < 0) fn = 0;
+            else if (fn > DEM_WALL_FN_MAX) fn = DEM_WALL_FN_MAX;
             dem_force_y[i] -= fn;
             dem_contact_force[i] += fn;
         }
+    }
 
-        // 5. Symplectic Euler integration with acceleration & velocity clamp
-        float fx = dem_force_x[i];
-        float fy = dem_force_y[i];
-        if (fx > dem_max_a) fx = dem_max_a; else if (fx < -dem_max_a) fx = -dem_max_a;
-        if (fy > dem_max_a) fy = dem_max_a; else if (fy < -dem_max_a) fy = -dem_max_a;
+    // 5. Symplectic Euler Integration with Air Drag & Emergency Hard Rebound
+    for (int i = 0; i < DEM_N; i++) {
+        // Acceleration clamp
+        int32_t ax = dem_force_x[i];
+        int32_t ay = dem_force_y[i];
+        if (ax > DEM_MAX_A) ax = DEM_MAX_A;
+        else if (ax < -DEM_MAX_A) ax = -DEM_MAX_A;
+        if (ay > DEM_MAX_A) ay = DEM_MAX_A;
+        else if (ay < -DEM_MAX_A) ay = -DEM_MAX_A;
 
-        dem_vel_x[i] += fx * dem_dt;
-        dem_vel_y[i] += fy * dem_dt;
+        // Velocity update: v += a * dt
+        // 32-bit: (ax>>8) <= 766k, *262 <= 200M fits int32 (8-LSB truncation of ax).
+        dem_vel_x[i] += ((ax >> 8) * DEM_DT_NUM) >> 8;
+        dem_vel_y[i] += ((ay >> 8) * DEM_DT_NUM) >> 8;
 
-        if (dem_vel_x[i] > dem_max_v) dem_vel_x[i] = dem_max_v;
-        else if (dem_vel_x[i] < -dem_max_v) dem_vel_x[i] = -dem_max_v;
-        if (dem_vel_y[i] > dem_max_v) dem_vel_y[i] = dem_max_v;
-        else if (dem_vel_y[i] < -dem_max_v) dem_vel_y[i] = -dem_max_v;
+        // Global ambient air drag: 0.78% velocity dissipation per substep
+        dem_vel_x[i] -= (dem_vel_x[i] >> 7);
+        dem_vel_y[i] -= (dem_vel_y[i] >> 7);
 
-        dem_pos_x[i] += dem_vel_x[i] * dem_dt;
-        dem_pos_y[i] += dem_vel_y[i] * dem_dt;
+        // Velocity clamp
+        if (dem_vel_x[i] > DEM_MAX_V) dem_vel_x[i] = DEM_MAX_V;
+        else if (dem_vel_x[i] < -DEM_MAX_V) dem_vel_x[i] = -DEM_MAX_V;
+        if (dem_vel_y[i] > DEM_MAX_V) dem_vel_y[i] = DEM_MAX_V;
+        else if (dem_vel_y[i] < -DEM_MAX_V) dem_vel_y[i] = -DEM_MAX_V;
 
-        // Impenetrable emergency containment (strictly prevents leaving box)
-        float hard_min = PARTICLE_R * 0.25f;
-        float hard_max = BOX_WIDTH - hard_min;
-        if (dem_pos_x[i] < hard_min) { dem_pos_x[i] = hard_min; if (dem_vel_x[i] < 0.0f) dem_vel_x[i] = -0.2f * dem_vel_x[i]; }
-        else if (dem_pos_x[i] > hard_max) { dem_pos_x[i] = hard_max; if (dem_vel_x[i] > 0.0f) dem_vel_x[i] = -0.2f * dem_vel_x[i]; }
-        if (dem_pos_y[i] < hard_min) { dem_pos_y[i] = hard_min; if (dem_vel_y[i] < 0.0f) dem_vel_y[i] = -0.2f * dem_vel_y[i]; }
-        else if (dem_pos_y[i] > hard_max) { dem_pos_y[i] = hard_max; if (dem_vel_y[i] > 0.0f) dem_vel_y[i] = -0.2f * dem_vel_y[i]; }
+        // Position update: x += v * dt (32-bit exact: v*262 <= 773M fits int32)
+        dem_pos_x[i] += (dem_vel_x[i] * DEM_DT_NUM) >> 16;
+        dem_pos_y[i] += (dem_vel_y[i] * DEM_DT_NUM) >> 16;
+
+        // Emergency Boundary Rebound (only engages when deeply penetrating beyond 75% of radius)
+        if (dem_pos_x[i] < DEM_WALL_HARD_MIN) {
+            dem_pos_x[i] = DEM_WALL_HARD_MIN;
+            if (dem_vel_x[i] < 0) dem_vel_x[i] = -(dem_vel_x[i] >> 2); // 25% elastic rebound
+        } else if (dem_pos_x[i] > DEM_WALL_HARD_MAX) {
+            dem_pos_x[i] = DEM_WALL_HARD_MAX;
+            if (dem_vel_x[i] > 0) dem_vel_x[i] = -(dem_vel_x[i] >> 2);
+        }
+
+        if (dem_pos_y[i] < DEM_WALL_HARD_MIN) {
+            dem_pos_y[i] = DEM_WALL_HARD_MIN;
+            if (dem_vel_y[i] < 0) dem_vel_y[i] = -(dem_vel_y[i] >> 2);
+        } else if (dem_pos_y[i] > DEM_WALL_HARD_MAX) {
+            dem_pos_y[i] = DEM_WALL_HARD_MAX;
+            if (dem_vel_y[i] > 0) dem_vel_y[i] = -(dem_vel_y[i] >> 2);
+        }
     }
 }
 
+// ============================================================================
+// External Public API
+// ============================================================================
 static void __not_in_flash_func(dem_step)(void) {
-    // Read ADXL335 on GP26 (ADC0) and GP27 (ADC1)
-    adc_select_input(ADXL335_ADC_CH_X);
+    static bool inited = false;
+    if (!inited) {
+        dem_init();
+        inited = true;
+    }
+
+    // Direct RP2040 Hardware ADC read (pure 12-bit, 0-4095)
+    adc_select_input(0); // GP26 = ADC0 (X)
     uint16_t raw_x = adc_read();
-    adc_select_input(ADXL335_ADC_CH_Y);
+    adc_select_input(1); // GP27 = ADC1 (Y)
     uint16_t raw_y = adc_read();
 
-    float delta_x = (float)((int)raw_x - ADXL335_ZERO_G_COUNT);
-    float delta_y = (float)((int)raw_y - ADXL335_ZERO_G_COUNT);
+    g_dem_last_raw_x = raw_x;
+    g_dem_last_raw_y = raw_y;
 
-    float gx = (delta_x / (float)ADXL335_COUNTS_PER_G) * 250.0f;
-    float gy = (delta_y / (float)ADXL335_COUNTS_PER_G) * 250.0f;
+    int32_t gx = 0;
+    int32_t gy = DEM_GRAVITY_SCALE; // Default +1.0g downward (towards bottom wall)
 
-    // Run 3 substeps per display frame for blazing 30-35 FPS throughput
+    // ADXL335 sensor validity check:
+    // Operating at 3.3V, nominal 0g is 1.65V (~2048 counts).
+    // Valid acceleration range +/-3g produces 0.66V (~820) to 2.64V (~3280).
+    // If pins are unconnected or floating (reading < 400 or > 3700),
+    // gracefully fall back to default downward gravity (0g in X, +1g in Y)
+    // so sand never explodes into the corner.
+    if (raw_x >= 400 && raw_x <= 3700 && raw_y >= 400 && raw_y <= 3700) {
+        g_dem_sensor_connected = true;
+        int32_t delta_x = (int32_t)raw_x - ADXL335_ZERO_G_COUNT;
+        int32_t delta_y = (int32_t)raw_y - ADXL335_ZERO_G_COUNT;
+
+        // 20-count deadband (~0.05g) to eliminate resting sensor noise
+        if (delta_x > -20 && delta_x < 20) delta_x = 0;
+        if (delta_y > -20 && delta_y < 20) delta_y = 0;
+
+        // 32-bit exact: |delta| <= 1652 so delta*220 <= 364k fits int32.
+        // Quotient is integer px/s^2 (1-step quantization; deadband is ~11).
+        // At 1g: (410*220/410)*65536 = 14417920 (220.0 px/s^2 in Q16).
+        gx = ((delta_x * DEM_GRAV_INT) / ADXL335_COUNTS_PER_G) * Q16_ONE;
+        gy = ((delta_y * DEM_GRAV_INT) / ADXL335_COUNTS_PER_G) * Q16_ONE;
+
+        // Hard limit gravity to +/-2.5g to guard against sensor glitches
+        const int32_t g_limit = 36044800; // 2.5 * 14417920
+        if (gx > g_limit) gx = g_limit;
+        else if (gx < -g_limit) gx = -g_limit;
+        if (gy > g_limit) gy = g_limit;
+        else if (gy < -g_limit) gy = -g_limit;
+
+        // Axis sign correction (see DEM_GRAV_SIGN_X/Y defines above)
+        gx *= DEM_GRAV_SIGN_X;
+        gy *= DEM_GRAV_SIGN_Y;
+
+        // Flat-board guard: 2-axis accel reads ~0g on X/Y when the board
+        // lies flat (gravity along Z). Weightless particles look "stuck".
+        // If magnitude < 0.25g, fall back to default downward gravity.
+        {
+            int64_t mag2 = (int64_t)gx * gx + (int64_t)gy * gy;
+            const int64_t flat_thr = (int64_t)3604480 * 3604480; // (0.25g)^2
+            if (mag2 < flat_thr) {
+                gx = 0;
+                gy = DEM_GRAVITY_SCALE;
+            }
+        }
+    } else {
+        g_dem_sensor_connected = false;
+    }
+
+    g_dem_last_gx = gx;
+    g_dem_last_gy = gy;
+
+    // 3 sub-steps per display frame for crisp, rock-solid numerical stability
     for (int s = 0; s < 3; s++) {
         dem_substep(gx, gy);
     }
 }
 
-static void __not_in_flash_func(dem_render)(uint16_t out_frame[64][64]) {
-    // 1. Clear raw frame to dark background
-    memset(dem_raw_frame, 0, sizeof(dem_raw_frame));
+static void __not_in_flash_func(dem_render)(uint16_t buf[64][64]) {
+    memset(buf, 0, 64 * 64 * sizeof(uint16_t));
 
-    // 2. Splat particles with Turbo stress color
     for (int i = 0; i < DEM_N; i++) {
-        int px = (int)dem_pos_x[i];
-        int py = (int)dem_pos_y[i];
+        int x = Q16_TO_INT(dem_pos_x[i]);
+        int y = Q16_TO_INT(dem_pos_y[i]);
 
-        int lut_idx = (int)(dem_contact_force[i] * 1.8f);
-        if (lut_idx > 255) lut_idx = 255;
-        uint16_t color = turbo_rgb565_lut[lut_idx];
+        if (x >= 0 && x < 64 && y >= 0 && y < 64) {
+            // Settled-pile contact (Q16) spans ~20M..860M (measured, 40:1 range),
+            // so a linear shift saturates 99% of pixels to LUT[255] (black crush).
+            // Compress with sqrt like Taichi's u^0.65: q16_sqrt(contact) = sqrt*256,
+            // idx = 24 + (s - 700k)/30k maps [20M..860M] -> [38..250].
+            // Cost ~70c/particle, once per frame (not per substep).
+            int32_t s = q16_sqrt(dem_contact_force[i]);
+            int32_t stress = 24 + (s - 700000) / 30000;
+            if (stress > 255) stress = 255;
+            else if (stress < 0) stress = 0;
 
-        if (px >= 0 && px < 64 && py >= 0 && py < 64) {
-            dem_raw_frame[py][px] = color;
-            if (px + 1 < 64) dem_raw_frame[py][px + 1] = color;
-            if (py + 1 < 64) dem_raw_frame[py + 1][px] = color;
-        }
-    }
-
-    // 3. Fast 1-pass hole-fill filter
-    for (int y = 0; y < 64; y++) {
-        for (int x = 0; x < 64; x++) {
-            uint16_t c = dem_raw_frame[y][x];
-            if (c == 0) {
-                int lit = 0;
-                uint16_t sample_c = 0;
-                if (x > 0 && dem_raw_frame[y][x - 1]) { lit++; sample_c = dem_raw_frame[y][x - 1]; }
-                if (x < 63 && dem_raw_frame[y][x + 1]) { lit++; sample_c = dem_raw_frame[y][x + 1]; }
-                if (y > 0 && dem_raw_frame[y - 1][x]) { lit++; sample_c = dem_raw_frame[y - 1][x]; }
-                if (y < 63 && dem_raw_frame[y + 1][x]) { lit++; sample_c = dem_raw_frame[y + 1][x]; }
-                if (lit >= 2) {
-                    out_frame[y][x] = sample_c;
-                } else {
-                    out_frame[y][x] = 0x0841; // subtle unlit LED gray
-                }
-            } else {
-                out_frame[y][x] = c;
-            }
+            uint16_t col = turbo_rgb565_lut[stress];
+            buf[y][x] = col;
         }
     }
 }
 
-#endif // STANDALONE_DEM_H
+#ifdef __cplusplus
+}
+#endif

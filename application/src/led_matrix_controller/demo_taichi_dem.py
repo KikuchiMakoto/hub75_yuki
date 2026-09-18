@@ -25,9 +25,9 @@ import taichi as ti
 class TaichiDEMConfig:
     """Configuration for 2D DEM granular simulation in Taichi GPU (Silica Sand / 珪砂)."""
 
-    # Particle settings (Ultra-dense 2000 particles, radius=0.0075, diameter ~1.33 pixels)
-    n_particles: int = 2000
-    radius: float = 0.0075  # Diameter = 0.0150 (~1.33 LED pixels on 64x64, seamless dense packing)
+    # Particle settings (1024 particles, D=1.5 px, r=0.75 px = 0.0084375 units)
+    n_particles: int = 1024
+    radius: float = 0.0084375  # D = 0.016875 units = 1.5 LED pixels on 64x64 (~44% fill)
     box_half_len: float = 0.36  # Box width = 0.72 -> Area = 0.5184. Fill ratio = ~37%
     substeps_per_frame: int = 10
 
@@ -657,6 +657,7 @@ def run_taichi_gui(matrix_mode: bool = False) -> None:
     # Performance metrics & Display options
     fps_timer = time.perf_counter()
     frame_count = 0
+    box_stats = None  # Refreshed every 10 frames (get_box_particle_bins syncs GPU->CPU)
     display_fps = 60.0
     paused = False
     matrix_view = matrix_mode
@@ -664,7 +665,7 @@ def run_taichi_gui(matrix_mode: bool = False) -> None:
 
     print("=" * 60)
     print("Taichi 2D-DEM Rotating Drum & ADXL335 Accelerometer Simulation")
-    print(f"Particles: {sim.n} (~43% volume fill, r={sim.r})")
+    print(f"Particles: {sim.n} (~44% volume fill, r={sim.r})")
     print("Clean 4 flat square walls without hinges/baffles")
     print(f"Initial display mode: {'64x64 Matrix' if matrix_view else 'Vector Particle'}")
     print(
@@ -728,7 +729,7 @@ def run_taichi_gui(matrix_mode: bool = False) -> None:
 
         # In-Window GUI Controls
         with gui.sub_window("DEM & ADXL335 Controls", 0.02, 0.02, 0.44, 0.45):
-            gui.text(f"GPU FPS: {display_fps:.1f} | N = {sim.n} (43% Fill)")
+            gui.text(f"GPU FPS: {display_fps:.1f} | N = {sim.n} (44% Fill)")
             gui.text(f"Drum Angle: {math.degrees(sim.theta) % 360.0:.1f}°")
 
             paused = gui.checkbox("Pause Simulation [Space]", paused)
@@ -761,7 +762,9 @@ def run_taichi_gui(matrix_mode: bool = False) -> None:
             gui.text("3V3 (VCC) | GND (GND) [Z unused]")
 
         # Live Box Particle Containment Monitor & Layer Bins
-        box_stats = sim.get_box_particle_bins()
+        # (1.3ms GPU->CPU sync; 10-frame cadence is plenty for a monitor readout)
+        if box_stats is None or frame_count % 10 == 0:
+            box_stats = sim.get_box_particle_bins()
         with gui.sub_window("Box Particle Monitor (Bins)", 0.02, 0.48, 0.44, 0.40):
             gui.text(f"Total Particles: {box_stats['total']}")
             if box_stats["escaped"] == 0:
