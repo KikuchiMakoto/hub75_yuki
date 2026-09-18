@@ -103,7 +103,6 @@ size_t cobs_decode(const uint8_t* input, size_t len, uint8_t* output, size_t max
 // (Reference: LED_Matrix_firmware_K00798)
 static uint16_t frame_buffer[DISPLAY_WIDTH * DISPLAY_HEIGHT];
 static volatile bool frame_ready = false;
-static volatile bool dem_frame_ready = false;
 static uint16_t standalone_frame[64][64];
 
 // BCM bit planes: [row][bit][x] = packed 6-bit RGB
@@ -545,23 +544,9 @@ void setup1() {
 }
 
 void loop1() {
-    // 1. Primary duty: Refresh HUB75 matrix display
+    // Core1: Display refresh ONLY - 100% dedicated to uninterrupted HUB75 driving
+    // Guarantees zero display flicker and rock-solid ~350 Hz refresh rate
     hub75_refresh();
-
-    // 2. Core1 Offloaded Pipeline: Handles BCM conversion & rendering outside Core0.
-    // Maximizes throughput for both USB marquee display and standalone DEM.
-    if (frame_ready) {
-        frame_ready = false;
-#if DISPLAY_HEIGHT == 64
-        convert_64x64_to_bcm((const uint16_t (*)[64])frame_buffer);
-#else
-        convert_to_bcm(frame_buffer);
-#endif
-    } else if (dem_frame_ready) {
-        dem_frame_ready = false;
-        dem_render(standalone_frame);
-        convert_64x64_to_bcm(standalone_frame);
-    }
 }
 
 // ============================================
@@ -597,7 +582,11 @@ void loop() {
                                                  decode_buffer, FRAME_SIZE_RGB565);
                 if (decoded_len == FRAME_SIZE_RGB565) {
                     memcpy(frame_buffer, decode_buffer, FRAME_SIZE_RGB565);
-                    frame_ready = true;
+#if DISPLAY_HEIGHT == 64
+                    convert_64x64_to_bcm((const uint16_t (*)[64])frame_buffer);
+#else
+                    convert_to_bcm(frame_buffer);
+#endif
                     last_usb_frame_time = millis();
                 }
             }
@@ -620,12 +609,13 @@ void loop() {
 
         uint32_t t_start = time_us_32();
 
-        // Step DEM simulation (Core0 100% dedicated to physics!)
+        // Step DEM simulation
         dem_step();
 
-        // Capture atomic snapshot for Core1 concurrent rendering (zero tearing)
-        dem_snapshot();
-        dem_frame_ready = true;
+        // Render directly to frame buffer & convert to BCM planes on Core0
+        // (Core1 stays 100% dedicated to uninterrupted refresh, preventing all flicker)
+        dem_render(standalone_frame);
+        convert_64x64_to_bcm(standalone_frame);
 
         uint32_t t_step = time_us_32();
 

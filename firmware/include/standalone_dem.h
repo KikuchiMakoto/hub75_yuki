@@ -520,31 +520,15 @@ static void __not_in_flash_func(dem_step)(void) {
     }
 }
 
-// Snapshot buffers for concurrent Core1 rendering (zero tearing)
-static int32_t dem_snap_x[DEM_N];
-static int32_t dem_snap_y[DEM_N];
-static int32_t dem_snap_force[DEM_N];
-
-static inline void __not_in_flash_func(dem_snapshot)() {
-    memcpy(dem_snap_x, dem_pos_x, sizeof(dem_pos_x));
-    memcpy(dem_snap_y, dem_pos_y, sizeof(dem_pos_y));
-    memcpy(dem_snap_force, dem_contact_force, sizeof(dem_contact_force));
-}
-
 static void __not_in_flash_func(dem_render)(uint16_t buf[64][64]) {
     memset(buf, 0, 64 * 64 * sizeof(uint16_t));
 
     for (int i = 0; i < DEM_N; i++) {
-        int x = Q16_TO_INT(dem_snap_x[i]);
-        int y = Q16_TO_INT(dem_snap_y[i]);
+        int x = Q16_TO_INT(dem_pos_x[i]);
+        int y = Q16_TO_INT(dem_pos_y[i]);
 
         if (x >= 0 && x < 64 && y >= 0 && y < 64) {
-            // Settled-pile contact (Q16) spans ~20M..860M (measured, 40:1 range),
-            // so a linear shift saturates 99% of pixels to LUT[255] (black crush).
-            // Compress with sqrt like Taichi's u^0.65: q16_sqrt(contact) = sqrt*256,
-            // idx = 24 + (s - 700k)/30k maps [20M..860M] -> [38..250].
-            // Cost ~70c/particle, once per frame (not per substep).
-            int32_t s = q16_sqrt(dem_snap_force[i]);
+            int32_t s = q16_sqrt(dem_contact_force[i]);
             int32_t stress = 24 + (s - 700000) / 30000;
             if (stress > 255) stress = 255;
             else if (stress < 0) stress = 0;
@@ -554,8 +538,8 @@ static void __not_in_flash_func(dem_render)(uint16_t buf[64][64]) {
 
             // Over-estimate coverage: Fill 2x2 footprint based on subpixel position
             // to completely eliminate black hole artifacts in 2x2 particle clusters.
-            int nx = x + (((dem_snap_x[i] & 0xFFFF) >= 0x8000) ? 1 : -1);
-            int ny = y + (((dem_snap_y[i] & 0xFFFF) >= 0x8000) ? 1 : -1);
+            int nx = x + (((dem_pos_x[i] & 0xFFFF) >= 0x8000) ? 1 : -1);
+            int ny = y + (((dem_pos_y[i] & 0xFFFF) >= 0x8000) ? 1 : -1);
 
             if (nx >= 0 && nx < 64) buf[y][nx] = col;
             if (ny >= 0 && ny < 64) buf[ny][x] = col;
