@@ -520,7 +520,8 @@ class TaichiRotatingDrumDEM:
         sin_t = ti.sin(theta)
         box_width = 2.0 * hl
         r_pix = (r / box_width) * 64.0
-        r2_pix = r_pix * r_pix * 1.15
+        # Over-estimate coverage: Fill complete 2x2 footprint to eliminate unlit gaps
+        r2_pix = r_pix * r_pix * 2.25
 
         for i in range(self.n):
             rel_x = self.pos[i].x - 0.5
@@ -545,7 +546,7 @@ class TaichiRotatingDrumDEM:
                         diff_x = (ti.f32(qx) + 0.5) - pos_x
                         diff_y = (ti.f32(qy) + 0.5) - pos_y
                         d2 = diff_x * diff_x + diff_y * diff_y
-                        if d2 <= r2_pix:
+                        if d2 <= r2_pix or (ti.abs(diff_x) <= 0.80 and ti.abs(diff_y) <= 0.80):
                             if w > self.matrix_weight[qx, qy]:
                                 self.matrix_weight[qx, qy] = w
                                 self.raw_matrix_color[qx, qy] = col
@@ -573,8 +574,8 @@ class TaichiRotatingDrumDEM:
 
             final_color = c
             if not is_center_lit:
-                # Hole filling (抜け埋め): If unlit pixel is surrounded (4+ lit neighbors)
-                if lit_neighbors >= 4:
+                # Over-estimate hole-fill: fill gaps with 3+ neighbors
+                if lit_neighbors >= 3:
                     final_color = accum_color / ti.f32(lit_neighbors)
             else:
                 # Gentle smoothing (少しだけ平滑): 70% center + 30% neighbor average

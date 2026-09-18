@@ -22,6 +22,7 @@
 #include <hardware/structs/sio.h>
 #include <hardware/vreg.h>
 #include <hardware/clocks.h>
+#include <hardware/timer.h>
 
 // Default to PIO mode if not specified
 #ifndef HUB75_USE_PIO
@@ -212,17 +213,17 @@ void convert_64x64_to_bcm(const uint16_t frame[64][64]) {
                 lo = p1_lo[col];
             }
 
-            // Directly unpack RGB565 to 6-bit color channels without gamma lookup
-            // r: 5 bits -> shift left 1 (0..62)
+            // Directly unpack RGB565 to 6-bit color channels (with 5->6 bit replication for LSB)
+            // r: 5 bits -> (r << 1) | (r >> 4) -> (0..63)
             // g: 6 bits -> (0..63)
-            // b: 5 bits -> shift left 1 (0..62)
-            uint32_t r0 = (up >> 10) & 0x3E;
+            // b: 5 bits -> (b << 1) | (b >> 4) -> (0..63)
+            uint32_t r0 = ((up >> 10) & 0x3E) | ((up >> 15) & 1);
             uint32_t g0 = (up >> 5)  & 0x3F;
-            uint32_t b0 = (up << 1)  & 0x3E;
+            uint32_t b0 = ((up << 1) & 0x3E) | ((up >> 4) & 1);
 
-            uint32_t r1 = (lo >> 10) & 0x3E;
+            uint32_t r1 = ((lo >> 10) & 0x3E) | ((lo >> 15) & 1);
             uint32_t g1 = (lo >> 5)  & 0x3F;
-            uint32_t b1 = (lo << 1)  & 0x3E;
+            uint32_t b1 = ((lo << 1) & 0x3E) | ((lo >> 4) & 1);
 
             // Direct bit extraction into BCM planes (unrolled 6 planes, single-cycle shifts)
             bcm_planes[row][0][x] = ((r0 & 1)) | ((g0 & 1) << 1) | ((b0 & 1) << 2) |
@@ -245,10 +246,12 @@ void convert_64x64_to_bcm(const uint16_t frame[64][64]) {
 // HUB75 Initialize - GPIO only (for boot screen)
 // ============================================
 void hub75_gpio_init() {
-    // Initialize GPIO pins
+    // Initialize GPIO pins with robust drive strength for 250 MHz / ribbon cable
     for (int pin = PIN_R0; pin <= PIN_ADDR_D; pin++) {
         gpio_init(pin);
         gpio_set_dir(pin, GPIO_OUT);
+        gpio_set_drive_strength(pin, GPIO_DRIVE_STRENGTH_8MA);
+        gpio_set_slew_rate(pin, GPIO_SLEW_RATE_FAST);
         gpio_put(pin, 0);
     }
     gpio_put(PIN_OE, 1);  // Display off
@@ -311,15 +314,14 @@ void hub75_init() {
 }
 
 // ============================================
-// Set row address using direct register access
+// Set row address atomically (glitch-free)
 // ============================================
 static inline void __not_in_flash_func(set_row_address)(int row) {
-    sio_hw->gpio_clr = ADDR_MASK;
     uint32_t addr_bits = (((row >> 0) & 1) << PIN_ADDR_A) |
                          (((row >> 1) & 1) << PIN_ADDR_B) |
                          (((row >> 2) & 1) << PIN_ADDR_C) |
                          (((row >> 3) & 1) << PIN_ADDR_D);
-    sio_hw->gpio_set = addr_bits;
+    gpio_put_masked(ADDR_MASK, addr_bits);
 }
 
 #if HUB75_USE_PIO
@@ -375,26 +377,27 @@ void __not_in_flash_func(hub75_refresh)() {
             // TX-FIFO-empty only means the last word left the FIFO; the 6-bit
             // shift + CLK edges still need ~1 pixel time (~135 ns at the
             // 133 MHz-equivalent PIO rate). 1 us covers it at any sysclk.
-            // (Fixed NOP counts shrink under overclock and violate this.)
             while (!pio_sm_is_tx_fifo_empty(hub75_pio, sm_data)) {
                 tight_loop_contents();
             }
-            delayMicroseconds(1);
+            busy_wait_us_32(1);
 
-            // 7. Set row address
-            set_row_address(row);
-
-            // 8. Latch pulse (74HC595 needs >= 20 ns; 4 NOPs = 16 ns at
-            // 250 MHz, which violates it — use a time-based hold instead)
+            // 7. Latch pulse: latch shifted data into LED driver IC outputs
+            // Must latch BEFORE switching row address to prevent row ghosting/doubling.
             sio_hw->gpio_set = LAT_MASK;
-            delayMicroseconds(1);
+            busy_wait_us_32(1);
             sio_hw->gpio_clr = LAT_MASK;
+            busy_wait_us_32(1);
+
+            // 8. Switch row address atomically while display is disabled (OE HIGH)
+            set_row_address(row);
+            busy_wait_us_32(1); // Settling delay for 74HC138 decoder and row MOSFETs
 
             // 9. Enable output
             sio_hw->gpio_clr = OE_MASK;
 
             // 10. BCM delay (display time for this bit plane)
-            delayMicroseconds(delay_us);
+            busy_wait_us_32(delay_us);
 
             // 11. Disable output before next row
             sio_hw->gpio_set = OE_MASK;
@@ -443,19 +446,22 @@ void __not_in_flash_func(hub75_refresh)() {
                 shift_out_pixel(row_data[x]);
             }
 
-            // 3. Set row address
-            set_row_address(row);
-
-            // 4. Latch pulse (time-based hold: fixed NOPs shrink under overclock)
+            // 3. Latch pulse: latch shifted data into LED driver IC outputs
+            // Must latch BEFORE switching row address to prevent row ghosting/doubling.
             sio_hw->gpio_set = LAT_MASK;
-            delayMicroseconds(1);
+            busy_wait_us_32(1);
             sio_hw->gpio_clr = LAT_MASK;
+            busy_wait_us_32(1);
+
+            // 4. Switch row address atomically while display is disabled (OE HIGH)
+            set_row_address(row);
+            busy_wait_us_32(1); // Settling delay for 74HC138 decoder and row MOSFETs
 
             // 5. Enable output (OE LOW)
             sio_hw->gpio_clr = OE_MASK;
 
             // 6. BCM delay - display this bit plane
-            delayMicroseconds(delay_us);
+            busy_wait_us_32(delay_us);
 
             // 7. Disable output before next row
             sio_hw->gpio_set = OE_MASK;
@@ -482,24 +488,27 @@ void __not_in_flash_func(display_solid_color)(uint8_t color_mask, int duration_m
                 sio_hw->gpio_clr = RGB_MASK;
                 sio_hw->gpio_set = (color_mask & 0x3F);
 
+                for (int k = 0; k < 16; k++) { __asm volatile("nop"); }
                 sio_hw->gpio_set = CLK_MASK;
-                __asm volatile("nop\nnop\nnop\nnop");
+                for (int k = 0; k < 16; k++) { __asm volatile("nop"); }
                 sio_hw->gpio_clr = CLK_MASK;
             }
 
-            // 3. Set row address
-            set_row_address(row);
-
-            // 4. Latch
+            // 3. Latch pulse
             sio_hw->gpio_set = LAT_MASK;
-            __asm volatile("nop\nnop\nnop\nnop");
+            busy_wait_us_32(1);
             sio_hw->gpio_clr = LAT_MASK;
+            busy_wait_us_32(1);
+
+            // 4. Switch row address atomically
+            set_row_address(row);
+            busy_wait_us_32(1);
 
             // 5. Enable output
             sio_hw->gpio_clr = OE_MASK;
 
             // 6. Display time per row
-            delayMicroseconds(100);
+            busy_wait_us_32(100);
 
             // 7. Disable before next row
             sio_hw->gpio_set = OE_MASK;
@@ -522,9 +531,6 @@ void show_boot_screen() {
 void setup1() {
     // Initialize GPIO pins first (before PIO takes over)
     hub75_gpio_init();
-
-    // Show boot screen animation using direct GPIO
-    show_boot_screen();
     boot_complete = true;
 
 #if HUB75_USE_PIO
@@ -550,6 +556,7 @@ static uint32_t last_usb_frame_time = 0;
 
 void setup() {
     // 1. Stable Overclock to 250 MHz (raise VREG to 1.20V first)
+    // 250 MHz is the optimal sweet spot where USB CDC remains fully functional
     vreg_set_voltage(VREG_VOLTAGE_1_20);
     delay(10);
     set_sys_clock_khz(250000, true);
@@ -575,7 +582,11 @@ void loop() {
                                                  decode_buffer, FRAME_SIZE_RGB565);
                 if (decoded_len == FRAME_SIZE_RGB565) {
                     memcpy(frame_buffer, decode_buffer, FRAME_SIZE_RGB565);
+#if DISPLAY_HEIGHT == 64
                     convert_64x64_to_bcm((const uint16_t (*)[64])frame_buffer);
+#else
+                    convert_to_bcm(frame_buffer);
+#endif
                     last_usb_frame_time = millis();
                 }
             }
@@ -595,34 +606,6 @@ void loop() {
         static uint32_t s_frame_count = 0;
         static uint32_t s_last_fps_time = 0;
         static uint32_t s_total_step_us = 0;
-
-        // Boot self-test phase 1 (first 2 s): static full-range Turbo stripes
-        // through the SAME convert_64x64_to_bcm + Core1 path as DEM.
-        // (Bottom panel shows stripes mirrored: expected 180 deg rotation.)
-        uint32_t boot_ms = millis();
-        if (boot_ms < 2000) {
-            for (int y = 0; y < 64; y++) {
-                for (int x = 0; x < 64; x++) {
-                    standalone_frame[y][x] = turbo_rgb565_lut[(x * 4) & 0xFF];
-                }
-            }
-            convert_64x64_to_bcm(standalone_frame);
-            return;
-        }
-
-        // Boot self-test phase 2: row-walk. Light ONE logical row white at a
-        // time (250 ms each, rows 0..31 top panel then 32..63 bottom).
-        // Firmware has no row-periodic mechanism, so a skipped/duplicated row
-        // number identifies the address line or panel row driver at fault.
-        if (boot_ms < 2000 + 64 * 250) {
-            int walk = (boot_ms - 2000) / 250; // 0..63
-            memset(standalone_frame, 0, sizeof(standalone_frame));
-            for (int x = 0; x < 64; x++) {
-                standalone_frame[walk][x] = 0xFFFF;
-            }
-            convert_64x64_to_bcm(standalone_frame);
-            return;
-        }
 
         uint32_t t_start = time_us_32();
 

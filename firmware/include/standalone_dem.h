@@ -96,7 +96,7 @@ static inline int32_t __not_in_flash_func(q16_sqrt)(int32_t val) {
 #define DEM_GRAV_SIGN_X 1
 #endif
 #ifndef DEM_GRAV_SIGN_Y
-#define DEM_GRAV_SIGN_Y 1
+#define DEM_GRAV_SIGN_Y -1
 #endif
 
 // Plain-integer factors for 32-bit fast paths (exact: Q16 const = INT * 65536).
@@ -532,6 +532,15 @@ static void __not_in_flash_func(dem_render)(uint16_t buf[64][64]) {
 
             uint16_t col = turbo_rgb565_lut[stress];
             buf[y][x] = col;
+
+            // Over-estimate coverage: Fill 2x2 footprint based on subpixel position
+            // to completely eliminate black hole artifacts in 2x2 particle clusters.
+            int nx = x + (((dem_pos_x[i] & 0xFFFF) >= 0x8000) ? 1 : -1);
+            int ny = y + (((dem_pos_y[i] & 0xFFFF) >= 0x8000) ? 1 : -1);
+
+            if (nx >= 0 && nx < 64) buf[y][nx] = col;
+            if (ny >= 0 && ny < 64) buf[ny][x] = col;
+            if (nx >= 0 && nx < 64 && ny >= 0 && ny < 64) buf[ny][nx] = col;
         }
     }
 }
