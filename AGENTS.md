@@ -54,8 +54,6 @@ Build:
 ```bash
 cd firmware
 pio run -e pico
-pio run -e pico_gpio
-pio run -e pico_64
 ```
 Upload/monitor:
 ```bash

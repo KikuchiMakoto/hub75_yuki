@@ -10,17 +10,12 @@
 #include <stdint.h>
 
 // ============================================
-// Display Configuration
+// Display Configuration (Standard 128x32: two 64x32 panels)
 // ============================================
 #define DISPLAY_WIDTH   128
-
-// Display height: 32 or 64
-#ifndef DISPLAY_HEIGHT
 #define DISPLAY_HEIGHT  32
-#endif
 
 // Two chained 64x32 panels (1/16 scan: A, B, C, D lines)
-// Both NormalMode (128x32) and StandaloneMode (64x64) have 16 scan rows
 #define SCAN_ROWS       16
 
 // Color depth for BCM (Binary Code Modulation)
