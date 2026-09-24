@@ -495,18 +495,6 @@ static void __not_in_flash_func(dem_step)(void) {
         // Axis sign correction (see DEM_GRAV_SIGN_X/Y defines above)
         gx *= DEM_GRAV_SIGN_X;
         gy *= DEM_GRAV_SIGN_Y;
-
-        // Flat-board guard: 2-axis accel reads ~0g on X/Y when the board
-        // lies flat (gravity along Z). Weightless particles look "stuck".
-        // If magnitude < 0.25g, fall back to default downward gravity.
-        {
-            int64_t mag2 = (int64_t)gx * gx + (int64_t)gy * gy;
-            const int64_t flat_thr = (int64_t)3604480 * 3604480; // (0.25g)^2
-            if (mag2 < flat_thr) {
-                gx = 0;
-                gy = DEM_GRAVITY_SCALE;
-            }
-        }
     } else {
         g_dem_sensor_connected = false;
     }
