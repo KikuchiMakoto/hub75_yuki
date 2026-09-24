@@ -43,6 +43,15 @@
 #define ADXL335_ZERO_G_COUNT_Y      (2048 + (ADXL335_ZERO_G_OFFSET_Y))
 #endif
 
+// ============================================
+// Sensor Mounting Rotation
+// Rotate sensor gravity direction in increments of 90 degrees clockwise (0, 90, 180, 270).
+// Default: 90 deg clockwise rotation
+// ============================================
+#ifndef ADXL335_ROTATION_DEG
+#define ADXL335_ROTATION_DEG        90
+#endif
+
 // Legacy fallback
 #ifndef ADXL335_ZERO_G_COUNT
 #define ADXL335_ZERO_G_COUNT        2048

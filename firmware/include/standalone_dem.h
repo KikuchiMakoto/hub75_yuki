@@ -514,6 +514,23 @@ static void __not_in_flash_func(dem_step)(void) {
         // Axis sign correction (see DEM_GRAV_SIGN_X/Y defines above)
         gx *= DEM_GRAV_SIGN_X;
         gy *= DEM_GRAV_SIGN_Y;
+
+#if ADXL335_ROTATION_DEG == 90
+        // Clockwise 90 deg rotation: gx' = -gy, gy' = gx
+        int32_t rot_gx = -gy;
+        int32_t rot_gy = gx;
+        gx = rot_gx;
+        gy = rot_gy;
+#elif ADXL335_ROTATION_DEG == 180
+        gx = -gx;
+        gy = -gy;
+#elif ADXL335_ROTATION_DEG == 270
+        // Counter-clockwise 90 deg rotation: gx' = gy, gy' = -gx
+        int32_t rot_gx = gy;
+        int32_t rot_gy = -gx;
+        gx = rot_gx;
+        gy = rot_gy;
+#endif
     } else {
         g_dem_sensor_connected = false;
     }
