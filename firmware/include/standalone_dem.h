@@ -472,8 +472,8 @@ static void __not_in_flash_func(dem_step)(void) {
     // so sand never explodes into the corner.
     if (raw_x >= 400 && raw_x <= 3700 && raw_y >= 400 && raw_y <= 3700) {
         g_dem_sensor_connected = true;
-        int32_t delta_x = (int32_t)raw_x - ADXL335_ZERO_G_COUNT;
-        int32_t delta_y = (int32_t)raw_y - ADXL335_ZERO_G_COUNT;
+        int32_t delta_x = (int32_t)raw_x - ADXL335_ZERO_G_COUNT_X;
+        int32_t delta_y = (int32_t)raw_y - ADXL335_ZERO_G_COUNT_Y;
 
         // 20-count deadband (~0.05g) to eliminate resting sensor noise
         if (delta_x > -20 && delta_x < 20) delta_x = 0;

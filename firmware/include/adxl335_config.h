@@ -17,16 +17,52 @@
 #define ADXL335_ADC_CH_Y   1   // ADC1 (GP27)
 
 // ADXL335 Calibration Constants at 3.3V supply
-// 0g bias = VCC / 2 = 1.65V -> ADC count ~ 2048 (12-bit, 0-4095)
+// Nominal 0g voltage = VCC / 2 = 1.65V -> ADC count ~ 2048 (12-bit, 0-4095)
 // Sensitivity = 330 mV/g -> 330mV / (3300mV / 4096) = 410 counts/g
-#define ADXL335_ZERO_G_COUNT  2048
 #define ADXL335_COUNTS_PER_G  410
+
+// ============================================
+// 0G Voltage & Calibration Offset Tuning
+// Adjust the 0g offset in raw ADC counts (+/- counts) or directly override count values.
+// Formula: Voltage_V = Count * (3.3V / 4096)  =>  1 count ~ 0.806 mV
+// ============================================
+#ifndef ADXL335_ZERO_G_OFFSET_X
+#define ADXL335_ZERO_G_OFFSET_X     0       // 0G calibration offset for X-axis (raw counts, e.g. +12, -25)
+#endif
+
+#ifndef ADXL335_ZERO_G_OFFSET_Y
+#define ADXL335_ZERO_G_OFFSET_Y     0       // 0G calibration offset for Y-axis (raw counts, e.g. +18, -15)
+#endif
+
+#ifndef ADXL335_ZERO_G_COUNT_X
+#define ADXL335_ZERO_G_COUNT_X      (2048 + (ADXL335_ZERO_G_OFFSET_X))
+#endif
+
+#ifndef ADXL335_ZERO_G_COUNT_Y
+#define ADXL335_ZERO_G_COUNT_Y      (2048 + (ADXL335_ZERO_G_OFFSET_Y))
+#endif
+
+// Legacy fallback
+#ifndef ADXL335_ZERO_G_COUNT
+#define ADXL335_ZERO_G_COUNT        2048
+#endif
 
 // Fixed-point conversion helpers (Q8.8 or integer)
 static inline int16_t adxl335_raw_to_mG(uint16_t raw_adc) {
     int32_t delta = (int32_t)raw_adc - ADXL335_ZERO_G_COUNT;
     // delta * 1000 / 410 = delta * 100 / 41
     return (int16_t)((delta * 100) / 41);
+}
+
+// Axis-specific conversion helpers
+static inline int32_t adxl335_raw_x_to_q16_accel(uint16_t raw_adc) {
+    int32_t delta = (int32_t)raw_adc - ADXL335_ZERO_G_COUNT_X;
+    return delta * 1918;
+}
+
+static inline int32_t adxl335_raw_y_to_q16_accel(uint16_t raw_adc) {
+    int32_t delta = (int32_t)raw_adc - ADXL335_ZERO_G_COUNT_Y;
+    return delta * 1918;
 }
 
 // Direct 1-cycle conversion from 12-bit ADC raw count to Q16.16 acceleration (m/s^2 * 65536)
