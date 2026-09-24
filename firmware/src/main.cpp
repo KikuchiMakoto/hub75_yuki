@@ -474,9 +474,9 @@ void loop() {
         s_frame_count++;
         s_total_step_us += (t_step - t_start);
 
+#if DEBUG
         uint32_t now_ms = millis();
-        // Telemetry only while USB CDC is actually connected: a blocking
-        // printf into an undrained CDC FIFO stalls the whole loop (fps collapse).
+        // Telemetry only when DEBUG is enabled: USB CDC output can cause frame stalls
         if (now_ms - s_last_fps_time >= 1000 && Serial) {
             float fps = (float)s_frame_count * 1000.0f / (float)(now_ms - s_last_fps_time);
             uint32_t avg_step_us = s_frame_count ? (s_total_step_us / s_frame_count) : 0;
@@ -490,5 +490,6 @@ void loop() {
             s_total_step_us = 0;
             s_last_fps_time = now_ms;
         }
+#endif
     }
 }

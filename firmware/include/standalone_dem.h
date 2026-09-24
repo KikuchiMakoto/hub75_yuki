@@ -442,6 +442,23 @@ static void __not_in_flash_func(dem_substep)(int32_t gx, int32_t gy) {
     }
 }
 
+// ============================================
+// RP2040-E9 ADC Errata Workaround:
+// The RP2040 SAR ADC has severe DNL (differential non-linearity) spikes at 512*k boundaries,
+// particularly at 2048 (the exact nominal 0G point of ADXL335).
+// 8x oversampling with channel-settling discard and 2-pole IIR filter smooths DNL errors.
+// ============================================
+static inline uint16_t __not_in_flash_func(read_adc_filtered)(uint channel) {
+    adc_select_input(channel);
+    (void)adc_read(); // Discard first reading after mux switch
+
+    uint32_t sum = 0;
+    for (int k = 0; k < 8; k++) {
+        sum += adc_read();
+    }
+    return (uint16_t)(sum >> 3);
+}
+
 // ============================================================================
 // External Public API
 // ============================================================================
@@ -452,11 +469,17 @@ static void __not_in_flash_func(dem_step)(void) {
         inited = true;
     }
 
-    // Direct RP2040 Hardware ADC read (pure 12-bit, 0-4095)
-    adc_select_input(0); // GP26 = ADC0 (X)
-    uint16_t raw_x = adc_read();
-    adc_select_input(1); // GP27 = ADC1 (Y)
-    uint16_t raw_y = adc_read();
+    // Filtered ADC reading (RP2040-E9 errata mitigation)
+    uint16_t sample_x = read_adc_filtered(0); // GP26 = ADC0 (X)
+    uint16_t sample_y = read_adc_filtered(1); // GP27 = ADC1 (Y)
+
+    static uint16_t s_filt_x = 2048;
+    static uint16_t s_filt_y = 2048;
+    s_filt_x = (uint16_t)((s_filt_x * 3 + sample_x + 2) >> 2);
+    s_filt_y = (uint16_t)((s_filt_y * 3 + sample_y + 2) >> 2);
+
+    uint16_t raw_x = s_filt_x;
+    uint16_t raw_y = s_filt_y;
 
     g_dem_last_raw_x = raw_x;
     g_dem_last_raw_y = raw_y;
