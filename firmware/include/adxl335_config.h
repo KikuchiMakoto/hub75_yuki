@@ -23,25 +23,24 @@
 
 // ============================================
 // 0G Voltage & Calibration Offset Tuning
-// Calibrated from hardware measurements at horizontal rest:
-// X-axis: raw 2076 -> Offset +28 counts (+22.5 mV)
-// Y-axis: raw 2067 -> Offset +19 counts (+15.3 mV)
+// Default nominal 0g is VCC / 2 = 1.65V -> ADC count 2048 (12-bit, 0-4095).
+// Can be customized via compiler defines if offset correction is needed.
 // Formula: Voltage_V = Count * (3.3V / 4096)  =>  1 count ~ 0.806 mV
 // ============================================
 #ifndef ADXL335_ZERO_G_OFFSET_X
-#define ADXL335_ZERO_G_OFFSET_X     28      // Measured calibrated offset for X-axis
+#define ADXL335_ZERO_G_OFFSET_X     0       // 0G calibration offset for X-axis (default 0)
 #endif
 
 #ifndef ADXL335_ZERO_G_OFFSET_Y
-#define ADXL335_ZERO_G_OFFSET_Y     19      // Measured calibrated offset for Y-axis
+#define ADXL335_ZERO_G_OFFSET_Y     0       // 0G calibration offset for Y-axis (default 0)
 #endif
 
 #ifndef ADXL335_ZERO_G_COUNT_X
-#define ADXL335_ZERO_G_COUNT_X      2076    // Measured 0G count for X-axis
+#define ADXL335_ZERO_G_COUNT_X      (2048 + (ADXL335_ZERO_G_OFFSET_X))
 #endif
 
 #ifndef ADXL335_ZERO_G_COUNT_Y
-#define ADXL335_ZERO_G_COUNT_Y      2067    // Measured 0G count for Y-axis
+#define ADXL335_ZERO_G_COUNT_Y      (2048 + (ADXL335_ZERO_G_OFFSET_Y))
 #endif
 
 // Legacy fallback
